@@ -4,7 +4,7 @@
 use std::ffi::c_void;
 
 use windows::core::Result;
-use windows::Win32::Foundation::{COLORREF, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, LPARAM, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::*;
 
 /// Selection highlight shared by both capture overlays.
@@ -98,6 +98,20 @@ pub fn blend(dst: u32, c: Color, cover: u32) -> u32 {
         out |= ((s + d + 127) / 255) << shift;
     }
     out
+}
+
+/// Width in pixels of single-line text drawn with `font`.
+pub fn text_width(font: HFONT, s: &str) -> i32 {
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    let mut size = SIZE::default();
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        let old = SelectObject(dc, font);
+        let _ = GetTextExtentPoint32W(dc, &wide, &mut size);
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+    }
+    size.cx
 }
 
 pub fn point_from_lparam(lparam: LPARAM) -> POINT {

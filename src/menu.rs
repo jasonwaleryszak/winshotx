@@ -17,8 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::capture;
 use crate::gfx::{
-    blend, contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, union, Canvas, Color, Dib, RectF,
-    SELECTION,
+    blend, contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, union, Canvas, Color,
+    Dib, RectF, SELECTION,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
@@ -28,20 +28,22 @@ const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
 const BACKGROUND: u32 = 0x0100_0000;
 const WHITE: u32 = 0xFFFF_FFFF;
 
-const PANEL_FILL: Color = rgba(0x1C1C1E, 248);
-const PANEL_BORDER: Color = rgba(0xFFFFFF, 30);
-const BUTTON_ACTIVE: Color = rgba(0xFFFFFF, 30);
-const BUTTON_HOVER: Color = rgba(0xFFFFFF, 18);
-const FIELD_FILL: Color = rgba(0x000000, 110);
-const FIELD_HOVER: Color = rgba(0xFFFFFF, 50);
-const ACCENT: Color = rgba(0x2D7DF6, 255);
+const PANEL_FILL: Color = rgba(0x121212, 255);
+const PANEL_BORDER: Color = rgba(0x3A3A3A, 255);
+const BUTTON_ACTIVE: Color = rgba(0x383838, 255);
+const BUTTON_HOVER: Color = rgba(0x262626, 255);
+const FIELD_FILL: Color = rgba(0x222222, 255);
+const FIELD_HOVER: Color = rgba(0x4A4A4A, 255);
+const ACCENT: Color = rgba(0x2D8CFF, 255);
 const TEXT: Color = rgba(0xFFFFFF, 235);
 const TEXT_DIM: Color = rgba(0xFFFFFF, 130);
 const HANDLE_FILL: Color = rgba(0xFFFFFF, 255);
 const HANDLE_BORDER: Color = rgba(0x000000, 70);
 
 const MIN_SIZE: i32 = 2;
-const BUTTONS: [&str; 3] = ["Area", "Fullscreen", "Window"];
+const TOOLTIPS: [&str; 3] = ["Capture Area", "Capture Fullscreen", "Capture Window"];
+const TOOLTIP_TIMER: usize = 1;
+const TOOLTIP_DELAY_MS: u32 = 400;
 const ASPECTS: [(&str, Option<(i32, i32)>); 7] = [
     ("Freeform", None),
     ("1:1", Some((1, 1))),
@@ -177,7 +179,7 @@ struct Layout {
 }
 
 impl Layout {
-    /// Centres the toolbar near the bottom of the given work area.
+    /// Centres two pill-shaped islands near the bottom of the work area.
     fn new(work: RECT, scale: f32) -> Self {
         let px = |v: f32| (v * scale).round() as i32;
         let rect = |l: i32, t: i32, w: i32, h: i32| RECT {
@@ -188,39 +190,40 @@ impl Layout {
         };
 
         let pad = px(6.0);
-        let (bw, bh, bgap) = (px(78.0), px(52.0), px(2.0));
-        let panel_h = bh + 2 * pad;
-        let left_w = 3 * bw + 2 * bgap + 2 * pad;
+        let (btn, bgap) = (px(36.0), px(4.0));
+        let panel_h = btn + 2 * pad;
+        let left_w = 3 * btn + 2 * bgap + 2 * pad;
 
-        let (fw, fh) = (px(64.0), px(32.0));
-        let (times_w, gap) = (px(22.0), px(10.0));
+        let (fw, fh) = (px(60.0), px(32.0));
+        let times_w = px(18.0);
         let divider_w = px(1.0).max(1);
-        let aspect_w = px(62.0);
-        let right_w = px(12.0) + fw + times_w + fw + gap + divider_w + gap + aspect_w + px(8.0);
+        let right_w = (panel_h - fh) / 2 + fw + times_w + fw + px(8.0) + divider_w + px(6.0) + btn + pad;
 
-        let total = left_w + px(12.0) + right_w;
+        let island_gap = px(10.0);
+        let total = left_w + island_gap + right_w;
         let x0 = (work.left + work.right - total) / 2;
         let top = work.bottom - px(28.0) - panel_h;
         let cy = top + panel_h / 2;
 
         let left = rect(x0, top, left_w, panel_h);
-        let buttons = [0, 1, 2].map(|i| rect(left.left + pad + i * (bw + bgap), top + pad, bw, bh));
+        let buttons = [0, 1, 2].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
 
-        let right = rect(left.right + px(12.0), top, right_w, panel_h);
-        let mut x = right.left + px(12.0);
+        let right = rect(left.right + island_gap, top, right_w, panel_h);
+        // Inset the first field so its rounded end sits concentric with the island's.
+        let mut x = right.left + (panel_h - fh) / 2;
         let field_w = rect(x, cy - fh / 2, fw, fh);
         x += fw;
         let times = rect(x, cy - fh / 2, times_w, fh);
         x += times_w;
         let field_h = rect(x, cy - fh / 2, fw, fh);
-        x += fw + gap;
-        let divider = rect(x, cy - px(16.0), divider_w, px(32.0));
-        x += divider_w + gap;
-        let aspect = rect(x, cy - fh / 2, aspect_w, fh);
+        x += fw + px(8.0);
+        let divider = rect(x, cy - px(12.0), divider_w, px(24.0));
+        x += divider_w + px(6.0);
+        let aspect = rect(x, top + pad, btn, btn);
 
         let (item_w, item_h) = (px(132.0), px(28.0));
         let dd_h = ASPECTS.len() as i32 * item_h + 2 * pad;
-        let dropdown = rect(right.right - item_w - 2 * pad, top - px(8.0) - dd_h, item_w + 2 * pad, dd_h);
+        let dropdown = rect(right.right - item_w - 2 * pad, top - px(10.0) - dd_h, item_w + 2 * pad, dd_h);
         let items = (0..ASPECTS.len() as i32)
             .map(|i| rect(dropdown.left + pad, dropdown.top + pad + i * item_h, item_w, item_h))
             .collect();
@@ -261,6 +264,8 @@ struct Menu {
     dropdown: bool,
     windows: Vec<(HWND, RECT)>,
     window: Option<usize>,
+    /// The control whose tooltip is showing (shown after hovering a moment).
+    tooltip: Option<Hit>,
     /// Bounds of everything drawn last frame, so it can be erased.
     drawn: RECT,
     dirty: bool,
@@ -331,7 +336,85 @@ impl Menu {
         if self.dropdown {
             r = union(r, self.layout.dropdown);
         }
+        if let Some((tip, _)) = self.tooltip_rect() {
+            r = union(r, tip);
+        }
         r
+    }
+
+    fn tooltip_text(&self, hit: Hit) -> Option<String> {
+        if self.dropdown {
+            return None;
+        }
+        match hit {
+            Hit::Button(i) => Some(TOOLTIPS[i].to_string()),
+            Hit::Field(Field::Width) => Some("Width".into()),
+            Hit::Field(Field::Height) => Some("Height".into()),
+            Hit::Aspect => Some(format!("Aspect Ratio: {}", ASPECTS[self.aspect].0)),
+            _ => None,
+        }
+    }
+
+    /// The tooltip bubble, centred above the hovered control.
+    fn tooltip_rect(&self) -> Option<(RECT, String)> {
+        let hit = self.tooltip.filter(|h| *h == self.hover)?;
+        let text = self.tooltip_text(hit)?;
+        let l = &self.layout;
+        let anchor = match hit {
+            Hit::Button(i) => l.buttons[i],
+            Hit::Field(Field::Width) => l.fields[0],
+            Hit::Field(Field::Height) => l.fields[1],
+            Hit::Aspect => l.aspect,
+            _ => return None,
+        };
+        let w = text_width(self.fonts.label, &text) + 2 * self.px(10.0);
+        let h = self.px(26.0);
+        let left = ((anchor.left + anchor.right - w) / 2).clamp(self.monitor.left, self.monitor.right - w);
+        let bottom = l.left.top - self.px(8.0);
+        let r = RECT {
+            left,
+            top: bottom - h,
+            right: left + w,
+            bottom,
+        };
+        Some((r, text))
+    }
+
+    /// Hides the tooltip on hover changes. Once one has been shown, moving
+    /// to another control shows its tooltip immediately.
+    fn schedule_tooltip(&mut self) {
+        let was_showing = self.tooltip.take().is_some();
+        if was_showing {
+            self.dirty = true;
+        }
+        unsafe {
+            if self.tooltip_text(self.hover).is_none() {
+                let _ = KillTimer(self.hwnd, TOOLTIP_TIMER);
+            } else if was_showing {
+                self.tooltip = Some(self.hover);
+            } else {
+                SetTimer(self.hwnd, TOOLTIP_TIMER, TOOLTIP_DELAY_MS, None);
+            }
+        }
+    }
+
+    fn show_tooltip(&mut self) {
+        unsafe {
+            let _ = KillTimer(self.hwnd, TOOLTIP_TIMER);
+        }
+        if self.drag.is_none() && self.tooltip_text(self.hover).is_some() {
+            self.tooltip = Some(self.hover);
+            self.dirty = true;
+        }
+    }
+
+    fn hide_tooltip(&mut self) {
+        unsafe {
+            let _ = KillTimer(self.hwnd, TOOLTIP_TIMER);
+        }
+        if self.tooltip.take().is_some() {
+            self.dirty = true;
+        }
     }
 
     unsafe fn refresh(&mut self) {
@@ -412,67 +495,66 @@ impl Menu {
             c.round_rect(r.into(), radius, PANEL_FILL);
             c.round_rect_stroke(r.into(), radius, 1.0, PANEL_BORDER);
         };
+        let pill = |r: RECT| (r.bottom - r.top) as f32 / 2.0;
+        let centre = |r: RECT| ((r.left + r.right) as f32 / 2.0, (r.top + r.bottom) as f32 / 2.0);
 
-        panel(c, l.left, 12.0 * s);
+        panel(c, l.left, pill(l.left));
         for (i, &r) in l.buttons.iter().enumerate() {
             let active = (i == 0 && self.mode == Mode::Area) || (i == 2 && self.mode == Mode::Window);
             if active {
-                c.round_rect(r.into(), 8.0 * s, BUTTON_ACTIVE);
+                c.round_rect(r.into(), pill(r), BUTTON_ACTIVE);
             } else if self.hover == Hit::Button(i) {
-                c.round_rect(r.into(), 8.0 * s, BUTTON_HOVER);
+                c.round_rect(r.into(), pill(r), BUTTON_HOVER);
             }
-            let cx = (r.left + r.right) as f32 / 2.0;
-            draw_button_icon(c, i, cx, r.top as f32 + 18.0 * s, s);
-            let label = RECT {
-                top: r.top + self.px(31.0),
-                bottom: r.bottom - self.px(3.0),
-                ..r
-            };
-            c.text(BUTTONS[i], label, self.fonts.label, TEXT, DT_CENTER | DT_VCENTER);
+            let (cx, cy) = centre(r);
+            draw_button_icon(c, i, cx, cy, s);
         }
 
-        panel(c, l.right, 12.0 * s);
+        panel(c, l.right, pill(l.right));
         let editable = self.mode == Mode::Area;
+        let color = if editable { TEXT } else { TEXT_DIM };
         for (f, &r) in [Field::Width, Field::Height].iter().zip(&l.fields) {
-            c.round_rect(r.into(), 6.0 * s, FIELD_FILL);
+            c.round_rect(r.into(), pill(r), FIELD_FILL);
             if self.edit.as_ref().is_some_and(|e| e.field == *f) {
-                c.round_rect_stroke(r.into(), 6.0 * s, 1.5 * s, ACCENT);
+                c.round_rect_stroke(r.into(), pill(r), 1.5 * s, ACCENT);
             } else if self.hover == Hit::Field(*f) {
-                c.round_rect_stroke(r.into(), 6.0 * s, 1.0, FIELD_HOVER);
+                c.round_rect_stroke(r.into(), pill(r), 1.0, FIELD_HOVER);
             }
-            let color = if editable { TEXT } else { TEXT_DIM };
             c.text(&self.field_text(*f), r, self.fonts.value, color, DT_CENTER | DT_VCENTER);
         }
-        c.text("x", l.times, self.fonts.label, TEXT_DIM, DT_CENTER | DT_VCENTER);
+        c.text("\u{00D7}", l.times, self.fonts.label, TEXT_DIM, DT_CENTER | DT_VCENTER);
         c.blend_rect(l.divider, PANEL_BORDER);
 
         let a = l.aspect;
-        if editable && (self.dropdown || self.hover == Hit::Aspect) {
-            c.round_rect(a.into(), 8.0 * s, BUTTON_HOVER);
+        if editable && self.dropdown {
+            c.round_rect(a.into(), pill(a), BUTTON_ACTIVE);
+        } else if editable && self.hover == Hit::Aspect {
+            c.round_rect(a.into(), pill(a), BUTTON_HOVER);
         }
-        let color = if editable { TEXT } else { TEXT_DIM };
-        let cy = (a.top + a.bottom) as f32 / 2.0;
-        let chevron_x = a.right as f32 - 12.0 * s;
+        let (cx, cy) = centre(a);
+        draw_crop_icon(c, cx, cy, s, color);
         if self.ratio().is_some() {
-            let label = RECT {
-                right: a.right - self.px(20.0),
-                ..a
+            // Badge marking a locked aspect ratio; the tooltip names it.
+            let (bx, by, br) = (a.right as f32 - 8.0 * s, a.top as f32 + 8.0 * s, 3.5 * s);
+            let dot = RectF {
+                l: bx - br,
+                t: by - br,
+                r: bx + br,
+                b: by + br,
             };
-            c.text(ASPECTS[self.aspect].0, label, self.fonts.item, color, DT_CENTER | DT_VCENTER);
-        } else {
-            draw_crop_icon(c, a.left as f32 + 22.0 * s, cy, s, color);
+            c.round_rect(dot, br, ACCENT);
         }
-        c.polyline(
-            &[(chevron_x - 3.5 * s, cy - 1.5 * s), (chevron_x, cy + 2.0 * s), (chevron_x + 3.5 * s, cy - 1.5 * s)],
-            1.5 * s,
-            color,
-        );
+
+        if let Some((r, text)) = self.tooltip_rect() {
+            panel(c, r, pill(r));
+            c.text(&text, r, self.fonts.label, TEXT, DT_CENTER | DT_VCENTER);
+        }
 
         if self.dropdown {
-            panel(c, l.dropdown, 10.0 * s);
+            panel(c, l.dropdown, 14.0 * s);
             for (i, &r) in l.items.iter().enumerate() {
                 if self.hover == Hit::Item(i) {
-                    c.round_rect(r.into(), 6.0 * s, BUTTON_HOVER);
+                    c.round_rect(r.into(), 8.0 * s, BUTTON_HOVER);
                 }
                 let cy = (r.top + r.bottom) as f32 / 2.0;
                 if i == self.aspect {
@@ -608,7 +690,7 @@ impl Menu {
         self.aspect = i;
         LAST_ASPECT.set(i);
         if let Some(ratio) = self.ratio() {
-            self.area = apply_ratio(self.area, ratio, self.bounds());
+            self.area = apply_ratio(self.area, ratio, self.monitor);
         }
         self.dirty = true;
     }
@@ -632,16 +714,17 @@ impl Menu {
         }
     }
 
-    /// Resizes the area from its top-left corner, keeping it on screen.
+    /// Resizes the area from its top-left corner, keeping it on its monitor.
+    /// Values larger than the monitor are clamped to the monitor's size.
     fn set_size(&mut self, field: Field, v: i32) {
-        let b = self.bounds();
+        let b = self.monitor;
         let r = self.area;
+        let (bw, bh) = (b.right - b.left, b.bottom - b.top);
         let (mut w, mut h) = (r.right - r.left, r.bottom - r.top);
         match field {
-            Field::Width => w = v,
-            Field::Height => h = v,
+            Field::Width => w = v.min(bw),
+            Field::Height => h = v.min(bh),
         }
-        let (bw, bh) = (b.right - b.left, b.bottom - b.top);
         if let Some((rw, rh)) = self.ratio() {
             match field {
                 Field::Width => h = div_round(w * rh, rw),
@@ -657,6 +740,7 @@ impl Menu {
     }
 
     unsafe fn mouse_down(&mut self, p: POINT) -> Action {
+        self.hide_tooltip();
         let hit = self.hit(p);
         if self.dropdown {
             self.dropdown = false;
@@ -698,7 +782,7 @@ impl Menu {
                     Some(handle) => Drag::Resize { handle, orig },
                     None if contains(orig, p) => Drag::Move { start: p, orig },
                     None => Drag::New {
-                        anchor: p,
+                        anchor: clamp_point(p, self.monitor),
                         previous: orig,
                     },
                 });
@@ -708,12 +792,13 @@ impl Menu {
     }
 
     fn mouse_move(&mut self, p: POINT) {
-        let b = self.bounds();
+        let b = self.monitor;
         let ratio = self.ratio();
         let hit = if self.drag.is_some() { Hit::None } else { self.hit(p) };
         if hit != self.hover {
             self.hover = hit;
             self.dirty = true;
+            self.schedule_tooltip();
         }
         match self.drag {
             Some(Drag::New { anchor, .. }) => self.area = span(anchor, p, ratio, b),
@@ -1105,12 +1190,12 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
     let area = LAST_AREA
         .get()
         .map(to_local)
-        .filter(|r| intersect(*r, bounds) == *r && !is_empty(*r))
+        .filter(|r| intersect(*r, monitor_rect) == *r && !is_empty(*r))
         .unwrap_or_else(|| {
             let (mw, mh) = (monitor_rect.right - monitor_rect.left, monitor_rect.bottom - monitor_rect.top);
-            let r = place(monitor_rect.left + mw / 4, monitor_rect.top + mh / 4, mw / 2, mh / 2, bounds);
+            let r = place(monitor_rect.left + mw / 4, monitor_rect.top + mh / 4, mw / 2, mh / 2, monitor_rect);
             match ASPECTS[aspect].1 {
-                Some(ratio) => apply_ratio(r, ratio, bounds),
+                Some(ratio) => apply_ratio(r, ratio, monitor_rect),
                 None => r,
             }
         });
@@ -1151,6 +1236,7 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         dropdown: false,
         windows: Vec::new(),
         window: None,
+        tooltip: None,
         drawn: bounds,
         dirty: true,
     };
@@ -1248,6 +1334,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_KEYDOWN => {
                 let action = with_menu(|m| m.key_down(VIRTUAL_KEY(wparam.0 as u16)));
                 act(hwnd, action);
+                return LRESULT(0);
+            }
+            WM_TIMER if wparam.0 == TOOLTIP_TIMER => {
+                with_menu(|m| m.show_tooltip());
+                act(hwnd, None);
                 return LRESULT(0);
             }
             WM_CHAR => {
