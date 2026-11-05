@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[build-dependencies]
+embedinator = "0.1"
+
 [dependencies.windows]
 version = "0.58"
 features = [

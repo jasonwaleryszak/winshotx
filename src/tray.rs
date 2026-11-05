@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::core::{w, Error, Result, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -150,14 +151,36 @@ unsafe fn show_menu(hwnd: HWND) {
         return;
     };
     let autostart_on = autostart::is_enabled();
-    let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
+    let check = if autostart_on {
+        MF_CHECKED
+    } else {
+        MF_UNCHECKED
+    };
     let recording = crate::recbar::is_active();
-    let region_flags = if recording { MF_STRING | MF_GRAYED } else { MF_STRING };
-    let _ = AppendMenuW(menu, region_flags, CMD_CAPTURE, w!("Capture Region\tAlt+Shift+4"));
-    let menu_label = if recording { w!("Stop Recording\tAlt+Shift+5") } else { w!("Capture...\tAlt+Shift+5") };
+    let region_flags = if recording {
+        MF_STRING | MF_GRAYED
+    } else {
+        MF_STRING
+    };
+    let _ = AppendMenuW(
+        menu,
+        region_flags,
+        CMD_CAPTURE,
+        w!("Capture Region\tAlt+Shift+4"),
+    );
+    let menu_label = if recording {
+        w!("Stop Recording\tAlt+Shift+5")
+    } else {
+        w!("Capture...\tAlt+Shift+5")
+    };
     let _ = AppendMenuW(menu, MF_STRING, CMD_MENU, menu_label);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING | check, CMD_AUTOSTART, w!("Start with Windows"));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING | check,
+        CMD_AUTOSTART,
+        w!("Start with Windows"),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit WinShotX"));
 
@@ -191,8 +214,7 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 }
 
-/// Builds the tray icon in code: white selection-corner marks on a blue
-/// rounded square, so no resource compiler is needed.
+/// Builds the tray icon from the logo at the system's small-icon size.
 unsafe fn create_icon() -> Result<HICON> {
     let size = GetSystemMetrics(SM_CXSMICON).max(16);
     let bmi = BITMAPINFO {
@@ -210,7 +232,10 @@ unsafe fn create_icon() -> Result<HICON> {
     let mut bits: *mut c_void = std::ptr::null_mut();
     let color = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
     let n = (size * size) as usize;
-    draw_icon(std::slice::from_raw_parts_mut(bits.cast(), n), size as usize);
+    crate::logo::draw(
+        std::slice::from_raw_parts_mut(bits.cast(), n),
+        size as usize,
+    );
 
     // The alpha channel defines transparency; the mask just has to exist.
     let mask_bits = vec![0u8; (size as usize + 15) / 16 * 2 * size as usize];
@@ -225,51 +250,4 @@ unsafe fn create_icon() -> Result<HICON> {
     let _ = DeleteObject(color);
     let _ = DeleteObject(mask);
     icon
-}
-
-fn draw_icon(pixels: &mut [u32], size: usize) {
-    const SS: usize = 4; // supersampling per axis, for anti-aliasing
-    const BLUE: [f32; 3] = [0x2D as f32, 0x7D as f32, 0xF6 as f32];
-
-    let in_tile = |u: f32, v: f32| {
-        let r = 0.22;
-        let dx = ((u - 0.5).abs() - (0.5 - r)).max(0.0);
-        let dy = ((v - 0.5).abs() - (0.5 - r)).max(0.0);
-        dx.hypot(dy) <= r
-    };
-    let in_marks = |u: f32, v: f32| {
-        let (lo, hi, thick, arm) = (0.24, 0.76, 0.09, 0.2);
-        if !(lo..=hi).contains(&u) || !(lo..=hi).contains(&v) {
-            return false;
-        }
-        let on_edge = |p: f32| p <= lo + thick || p >= hi - thick;
-        let near_corner = |p: f32| p <= lo + arm || p >= hi - arm;
-        (on_edge(u) && near_corner(v)) || (on_edge(v) && near_corner(u))
-    };
-
-    let s = size as f32;
-    for y in 0..size {
-        for x in 0..size {
-            let (mut tile, mut mark) = (0u32, 0u32);
-            for sy in 0..SS {
-                for sx in 0..SS {
-                    let u = (x as f32 + (sx as f32 + 0.5) / SS as f32) / s;
-                    let v = (y as f32 + (sy as f32 + 0.5) / SS as f32) / s;
-                    if in_tile(u, v) {
-                        tile += 1;
-                        mark += in_marks(u, v) as u32;
-                    }
-                }
-            }
-            let px = &mut pixels[y * size + x];
-            if tile == 0 {
-                *px = 0;
-                continue;
-            }
-            let alpha = tile * 255 / (SS * SS) as u32;
-            let white = mark as f32 / tile as f32;
-            let [r, g, b] = BLUE.map(|c| (c + (255.0 - c) * white).round() as u32);
-            *px = alpha << 24 | r << 16 | g << 8 | b;
-        }
-    }
 }

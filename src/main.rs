@@ -5,6 +5,7 @@ mod audio;
 mod autostart;
 mod capture;
 mod gfx;
+mod logo;
 mod menu;
 mod overlay;
 mod recbar;
@@ -16,8 +17,12 @@ use windows::Win32::Foundation::{BOOL, HINSTANCE, TRUE};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_NOREPEAT, MOD_SHIFT};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, MOD_ALT, MOD_NOREPEAT, MOD_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const HOTKEY_REGION: i32 = 1;
@@ -33,9 +38,15 @@ fn main() -> Result<()> {
         menu::register(instance)?;
         recbar::register(instance)?;
 
-        for (id, key, name) in [(HOTKEY_REGION, '4', "Alt+Shift+4"), (HOTKEY_MENU, '5', "Alt+Shift+5")] {
-            if let Err(e) = RegisterHotKey(None, id, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, key as u32) {
-                show_error(&format!("Could not register {name}. Is WinShotX already running?\n\n{e}"));
+        for (id, key, name) in [
+            (HOTKEY_REGION, '4', "Alt+Shift+4"),
+            (HOTKEY_MENU, '5', "Alt+Shift+5"),
+        ] {
+            if let Err(e) = RegisterHotKey(None, id, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, key as u32)
+            {
+                show_error(&format!(
+                    "Could not register {name}. Is WinShotX already running?\n\n{e}"
+                ));
                 return Err(e);
             }
         }
@@ -75,6 +86,11 @@ unsafe extern "system" fn on_console_ctrl(_ctrl_type: u32) -> BOOL {
 
 fn show_error(text: &str) {
     unsafe {
-        MessageBoxW(None, &HSTRING::from(text), w!("WinShotX"), MB_ICONERROR | MB_OK);
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            w!("WinShotX"),
+            MB_ICONERROR | MB_OK,
+        );
     }
 }
