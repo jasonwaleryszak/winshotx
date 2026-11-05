@@ -7,22 +7,28 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
 use windows::core::{w, Error, Result, PCWSTR};
-use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, TRUE, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Foundation::{
+    BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, TRUE, WPARAM,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcessId, Sleep};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN, VK_TAB};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN, VK_TAB,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::audio::{self, Device};
 use crate::capture;
-use crate::record::{Quality, Settings};
 use crate::gfx::{
-    contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin, union, Canvas,
-    Color, Dib, Inside, RectF,
+    contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width,
+    toolbar_origin, union, Canvas, Color, Dib, Inside, RectF,
 };
+use crate::record::{Quality, Settings};
 
 const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
 
@@ -52,7 +58,12 @@ const HANDLE_BAR: f32 = 24.0;
 const RECORD_RED: Color = rgba(0xFF5A52, 255);
 
 const MIN_SIZE: i32 = 16;
-const TOOLTIPS: [&str; 4] = ["Capture Area", "Capture Fullscreen", "Capture Window", "Record Screen"];
+const TOOLTIPS: [&str; 4] = [
+    "Capture Area",
+    "Capture Fullscreen",
+    "Capture Window",
+    "Record Screen",
+];
 const TOOLTIP_TIMER: usize = 1;
 pub(crate) const TOOLTIP_DELAY_MS: u32 = 400;
 const NO_MIC: &str = "Do not record microphone";
@@ -241,11 +252,13 @@ impl Layout {
         let (fw, fh) = (px(60.0), px(32.0));
         let times_w = px(18.0);
         let divider_w = px(1.0).max(1);
-        let right_w = (panel_h - fh) / 2 + fw + times_w + fw + px(8.0) + divider_w + px(6.0) + btn + pad;
+        let right_w =
+            (panel_h - fh) / 2 + fw + times_w + fw + px(8.0) + divider_w + px(6.0) + btn + pad;
 
         let island_gap = px(10.0);
         let total = left_w + island_gap + right_w;
-        let POINT { x: x0, y: top } = toolbar_origin(target, work, total, panel_h, total, Inside::Centre, scale);
+        let POINT { x: x0, y: top } =
+            toolbar_origin(target, work, total, panel_h, total, Inside::Centre, scale);
         let cy = top + panel_h / 2;
         // Popups open above the toolbar, or below it if there's no room.
         let popup_top = |h: i32| {
@@ -258,7 +271,8 @@ impl Layout {
         };
 
         let left = rect(x0, top, left_w, panel_h);
-        let buttons = [0, 1, 2, 3].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
+        let buttons =
+            [0, 1, 2, 3].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
 
         let right = rect(left.right + island_gap, top, right_w, panel_h);
         // Inset the first field so its rounded end sits concentric with the island's.
@@ -275,13 +289,26 @@ impl Layout {
 
         let (item_w, item_h) = (px(132.0), px(28.0));
         let dd_h = ASPECTS.len() as i32 * item_h + 2 * pad;
-        let dropdown = rect(right.right - item_w - 2 * pad, popup_top(dd_h), item_w + 2 * pad, dd_h);
+        let dropdown = rect(
+            right.right - item_w - 2 * pad,
+            popup_top(dd_h),
+            item_w + 2 * pad,
+            dd_h,
+        );
         let items = (0..ASPECTS.len() as i32)
-            .map(|i| rect(dropdown.left + pad, dropdown.top + pad + i * item_h, item_w, item_h))
+            .map(|i| {
+                rect(
+                    dropdown.left + pad,
+                    dropdown.top + pad + i * item_h,
+                    item_w,
+                    item_h,
+                )
+            })
             .collect();
 
         let record_w = 2 * pad + 4 * btn + 2 * bgap + px(12.0) + divider_w;
-        let POINT { x: rx, y: ry } = record_origin(target, work, union(left, right), record_w, panel_h, scale);
+        let POINT { x: rx, y: ry } =
+            record_origin(target, work, union(left, right), record_w, panel_h, scale);
         let record = rect(rx, ry, record_w, panel_h);
         let (rtop, rcy) = (ry + pad, ry + panel_h / 2);
         let mut x = record.left + pad;
@@ -426,12 +453,24 @@ impl Menu {
         let min_side = 2.0 * HANDLE_ARM * s + bar + 16.0 * s;
         if w >= min_side {
             for y in [t, b] {
-                shapes.push(vec![(rect(span(cx - bar / 2.0, cx + bar / 2.0), span(y - half, y + half)), half)]);
+                shapes.push(vec![(
+                    rect(
+                        span(cx - bar / 2.0, cx + bar / 2.0),
+                        span(y - half, y + half),
+                    ),
+                    half,
+                )]);
             }
         }
         if h >= min_side {
             for x in [l, rt] {
-                shapes.push(vec![(rect(span(x - half, x + half), span(cy - bar / 2.0, cy + bar / 2.0)), half)]);
+                shapes.push(vec![(
+                    rect(
+                        span(x - half, x + half),
+                        span(cy - bar / 2.0, cy + bar / 2.0),
+                    ),
+                    half,
+                )]);
             }
         }
         shapes
@@ -439,7 +478,10 @@ impl Menu {
 
     fn decor_bounds(&self) -> RECT {
         let pad = (HANDLE_THICKNESS * self.scale / 2.0).ceil() as i32 + 3;
-        let mut r = self.highlight().map(|h| inflate(h, pad)).unwrap_or_default();
+        let mut r = self
+            .highlight()
+            .map(|h| inflate(h, pad))
+            .unwrap_or_default();
         r = union(r, union(self.layout.left, self.layout.right));
         if self.mode == Mode::Record {
             r = union(r, self.layout.record);
@@ -473,9 +515,10 @@ impl Menu {
         }
         match hit {
             Hit::Button(i) => Some(TOOLTIPS[i].to_string()),
-            Hit::RecButton(REC_SYSTEM_AUDIO) => {
-                Some(format!("System Audio: {}", if self.system_audio { "On" } else { "Off" }))
-            }
+            Hit::RecButton(REC_SYSTEM_AUDIO) => Some(format!(
+                "System Audio: {}",
+                if self.system_audio { "On" } else { "Off" }
+            )),
             Hit::RecButton(REC_MIC) => Some(match self.mic_index() {
                 Some(i) => format!("Microphone: {}", self.mics[i].name),
                 None => "Microphone: Off".into(),
@@ -504,8 +547,13 @@ impl Menu {
         };
         let w = text_width(self.fonts.label, &text) + 2 * self.px(10.0);
         let h = self.px(26.0);
-        let left = ((anchor.left + anchor.right - w) / 2).clamp(self.monitor.left, self.monitor.right - w);
-        let island = if matches!(hit, Hit::RecButton(_)) { l.record } else { l.left };
+        let left =
+            ((anchor.left + anchor.right - w) / 2).clamp(self.monitor.left, self.monitor.right - w);
+        let island = if matches!(hit, Hit::RecButton(_)) {
+            l.record
+        } else {
+            l.left
+        };
         let top = self.popup_top(island, h, self.px(8.0));
         let r = RECT {
             left,
@@ -626,7 +674,12 @@ impl Menu {
             c.round_rect_stroke(r.into(), radius, 1.0, PANEL_BORDER);
         };
         let pill = |r: RECT| (r.bottom - r.top) as f32 / 2.0;
-        let centre = |r: RECT| ((r.left + r.right) as f32 / 2.0, (r.top + r.bottom) as f32 / 2.0);
+        let centre = |r: RECT| {
+            (
+                (r.left + r.right) as f32 / 2.0,
+                (r.top + r.bottom) as f32 / 2.0,
+            )
+        };
 
         panel(c, l.left, pill(l.left));
         for (i, &r) in l.buttons.iter().enumerate() {
@@ -655,9 +708,21 @@ impl Menu {
             } else if self.hover == Hit::Field(*f) {
                 c.round_rect_stroke(r.into(), pill(r), 1.0, FIELD_HOVER);
             }
-            c.text(&self.field_text(*f), r, self.fonts.value, color, DT_CENTER | DT_VCENTER);
+            c.text(
+                &self.field_text(*f),
+                r,
+                self.fonts.value,
+                color,
+                DT_CENTER | DT_VCENTER,
+            );
         }
-        c.text("\u{00D7}", l.times, self.fonts.label, TEXT_DIM, DT_CENTER | DT_VCENTER);
+        c.text(
+            "\u{00D7}",
+            l.times,
+            self.fonts.label,
+            TEXT_DIM,
+            DT_CENTER | DT_VCENTER,
+        );
         c.blend_rect(l.divider, PANEL_BORDER);
 
         let a = l.aspect;
@@ -745,7 +810,13 @@ impl Menu {
                     _ if empty => (NO_MICS_FOUND, TEXT_DIM),
                     _ => (self.mics[i - 1].name.as_str(), TEXT),
                 };
-                c.text(text, label, self.fonts.item, color, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+                c.text(
+                    text,
+                    label,
+                    self.fonts.item,
+                    color,
+                    DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
+                );
             }
         }
 
@@ -766,7 +837,13 @@ impl Menu {
                     ..r
                 };
                 c.text(q.name(), label, self.fonts.item, TEXT, DT_LEFT | DT_VCENTER);
-                c.text(q.description(), label, self.fonts.label, TEXT_DIM, DT_RIGHT | DT_VCENTER);
+                c.text(
+                    q.description(),
+                    label,
+                    self.fonts.label,
+                    TEXT_DIM,
+                    DT_RIGHT | DT_VCENTER,
+                );
             }
         }
 
@@ -783,7 +860,13 @@ impl Menu {
                     left: r.left + self.px(28.0),
                     ..r
                 };
-                c.text(ASPECTS[i].0, label, self.fonts.item, TEXT, DT_LEFT | DT_VCENTER);
+                c.text(
+                    ASPECTS[i].0,
+                    label,
+                    self.fonts.item,
+                    TEXT,
+                    DT_LEFT | DT_VCENTER,
+                );
             }
         }
     }
@@ -910,7 +993,10 @@ impl Menu {
     }
 
     fn set_mic(&mut self, item: usize) {
-        self.mic = item.checked_sub(1).and_then(|i| self.mics.get(i)).map(|d| d.id.clone());
+        self.mic = item
+            .checked_sub(1)
+            .and_then(|i| self.mics.get(i))
+            .map(|d| d.id.clone());
         LAST_MIC.set(self.mic.clone());
         self.dirty = true;
     }
@@ -945,7 +1031,10 @@ impl Menu {
         let (pad, item_h) = (self.px(6.0), self.px(28.0));
         let text_w = Quality::ALL
             .iter()
-            .map(|q| text_width(self.fonts.item, q.name()) + text_width(self.fonts.label, q.description()))
+            .map(|q| {
+                text_width(self.fonts.item, q.name())
+                    + text_width(self.fonts.label, q.description())
+            })
             .max()
             .unwrap_or(0);
         let item_w = (text_w + self.px(86.0)).max(self.px(220.0));
@@ -953,7 +1042,10 @@ impl Menu {
         let h = 2 * pad + Quality::ALL.len() as i32 * item_h;
 
         let anchor = self.layout.record_buttons[REC_QUALITY];
-        let left = (anchor.left - pad).clamp(self.monitor.left, (self.monitor.right - w).max(self.monitor.left));
+        let left = (anchor.left - pad).clamp(
+            self.monitor.left,
+            (self.monitor.right - w).max(self.monitor.left),
+        );
         let top = self.popup_top(self.layout.record, h, self.px(10.0));
         self.quality_popup = RECT {
             left,
@@ -980,13 +1072,20 @@ impl Menu {
             labels.push(NO_MICS_FOUND);
         }
         labels.extend(self.mics.iter().map(|d| d.name.as_str()));
-        let text_w = labels.iter().map(|s| text_width(self.fonts.item, s)).max().unwrap_or(0);
+        let text_w = labels
+            .iter()
+            .map(|s| text_width(self.fonts.item, s))
+            .max()
+            .unwrap_or(0);
         let item_w = (text_w + self.px(36.0)).clamp(self.px(200.0), self.px(360.0));
         let w = item_w + 2 * pad;
         let h = 2 * pad + labels.len() as i32 * item_h + sep_h;
 
         let anchor = self.layout.record_buttons[REC_MIC];
-        let left = (anchor.left - pad).clamp(self.monitor.left, (self.monitor.right - w).max(self.monitor.left));
+        let left = (anchor.left - pad).clamp(
+            self.monitor.left,
+            (self.monitor.right - w).max(self.monitor.left),
+        );
         let top = self.popup_top(self.layout.record, h, self.px(10.0));
         self.mic_popup = RECT {
             left,
@@ -1131,7 +1230,11 @@ impl Menu {
             }
             Hit::Button(1) => Action::Capture(Target::Rect(self.monitor)),
             Hit::Button(2) => {
-                let mode = if self.mode == Mode::Window { Mode::Area } else { Mode::Window };
+                let mode = if self.mode == Mode::Window {
+                    Mode::Area
+                } else {
+                    Mode::Window
+                };
                 self.set_mode(mode);
                 Action::None
             }
@@ -1186,7 +1289,11 @@ impl Menu {
     fn mouse_move(&mut self, p: POINT) {
         let b = self.monitor;
         let ratio = self.ratio();
-        let hit = if self.drag.is_some() { Hit::None } else { self.hit(p) };
+        let hit = if self.drag.is_some() {
+            Hit::None
+        } else {
+            self.hit(p)
+        };
         if hit != self.hover {
             self.hover = hit;
             self.dirty = true;
@@ -1291,11 +1398,17 @@ fn record_origin(target: RECT, work: RECT, toolbar: RECT, w: i32, h: i32, scale:
         right: x + w,
         bottom: y + h,
     };
-    let centre_on = |l: i32, r: i32| ((l + r - w) / 2).clamp(work.left + margin, (work.right - margin - w).max(work.left + margin));
+    let centre_on = |l: i32, r: i32| {
+        ((l + r - w) / 2).clamp(
+            work.left + margin,
+            (work.right - margin - w).max(work.left + margin),
+        )
+    };
     let x = centre_on(inner.left, inner.right);
     let free = |r: RECT| is_empty(intersect(r, toolbar));
 
-    let fits_inside = inner.right - inner.left >= w + 2 * inset && inner.bottom - inner.top >= h + 2 * inset;
+    let fits_inside =
+        inner.right - inner.left >= w + 2 * inset && inner.bottom - inner.top >= h + 2 * inset;
     let inside = at(x, inner.bottom - inset - h);
     if fits_inside && free(inside) {
         return POINT { x, y: inside.top };
@@ -1352,8 +1465,16 @@ fn span(a: POINT, c: POINT, ratio: Option<(i32, i32)>, b: RECT) -> RECT {
     let c = clamp_point(c, b);
     let sx = if c.x < a.x { -1 } else { 1 };
     let sy = if c.y < a.y { -1 } else { 1 };
-    let room_w = if sx < 0 { a.x - b.left + 1 } else { b.right - a.x };
-    let room_h = if sy < 0 { a.y - b.top + 1 } else { b.bottom - a.y };
+    let room_w = if sx < 0 {
+        a.x - b.left + 1
+    } else {
+        b.right - a.x
+    };
+    let room_h = if sy < 0 {
+        a.y - b.top + 1
+    } else {
+        b.bottom - a.y
+    };
     let mut w = ((c.x - a.x).abs() + 1).max(MIN_SIZE).min(room_w);
     let mut h = ((c.y - a.y).abs() + 1).max(MIN_SIZE).min(room_h);
     if let Some((rw, rh)) = ratio {
@@ -1474,7 +1595,11 @@ fn draw_button_icon(c: &mut Canvas, i: usize, cx: f32, cy: f32, s: f32) {
             };
             c.round_rect_stroke(screen, 2.0 * s, t, TEXT);
             c.polyline(&[(cx, cy + 5.0 * s), (cx, cy + 8.0 * s)], t, TEXT);
-            c.polyline(&[(cx - 4.5 * s, cy + 8.5 * s), (cx + 4.5 * s, cy + 8.5 * s)], t, TEXT);
+            c.polyline(
+                &[(cx - 4.5 * s, cy + 8.5 * s), (cx + 4.5 * s, cy + 8.5 * s)],
+                t,
+                TEXT,
+            );
         }
         2 => {
             let frame = RectF {
@@ -1484,7 +1609,11 @@ fn draw_button_icon(c: &mut Canvas, i: usize, cx: f32, cy: f32, s: f32) {
                 b: cy + 7.5 * s,
             };
             c.round_rect_stroke(frame, 2.5 * s, t, TEXT);
-            c.polyline(&[(cx - 9.0 * s, cy - 3.0 * s), (cx + 9.0 * s, cy - 3.0 * s)], t, TEXT);
+            c.polyline(
+                &[(cx - 9.0 * s, cy - 3.0 * s), (cx + 9.0 * s, cy - 3.0 * s)],
+                t,
+                TEXT,
+            );
         }
         _ => {
             // A video camera: body plus a lens flaring out to the right.
@@ -1514,7 +1643,11 @@ fn draw_check(c: &mut Canvas, row: RECT, s: f32) {
     let x = row.left as f32 + 13.0 * s;
     let cy = (row.top + row.bottom) as f32 / 2.0;
     c.polyline(
-        &[(x - 4.0 * s, cy), (x - 1.2 * s, cy + 3.0 * s), (x + 4.5 * s, cy - 3.5 * s)],
+        &[
+            (x - 4.0 * s, cy),
+            (x - 1.2 * s, cy + 3.0 * s),
+            (x + 4.5 * s, cy - 3.5 * s),
+        ],
         1.6 * s,
         TEXT,
     );
@@ -1561,7 +1694,11 @@ fn draw_mic_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, on: bool) {
     c.arc(cx, cy - 1.0 * s, 6.5 * s, 0.0, 180.0, t, TEXT);
     c.polyline(&[(cx, cy + 5.5 * s), (cx, cy + 8.5 * s)], t, TEXT);
     if !on {
-        c.polyline(&[(cx - 7.5 * s, cy - 8.5 * s), (cx + 7.5 * s, cy + 8.5 * s)], t, TEXT);
+        c.polyline(
+            &[(cx - 7.5 * s, cy - 8.5 * s), (cx + 7.5 * s, cy + 8.5 * s)],
+            t,
+            TEXT,
+        );
     }
 }
 
@@ -1596,8 +1733,16 @@ fn draw_quality_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, quality: Quality)
 fn draw_crop_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, color: Color) {
     let t = 1.6 * s;
     let (a, b) = (4.0 * s, 8.0 * s);
-    c.polyline(&[(cx - a, cy - b), (cx - a, cy + a), (cx + b, cy + a)], t, color);
-    c.polyline(&[(cx - b, cy - a), (cx + a, cy - a), (cx + a, cy + b)], t, color);
+    c.polyline(
+        &[(cx - a, cy - b), (cx - a, cy + a), (cx + b, cy + a)],
+        t,
+        color,
+    );
+    c.polyline(
+        &[(cx - b, cy - a), (cx + a, cy - a), (cx + a, cy + b)],
+        t,
+        color,
+    );
 }
 
 /// Visible top-level windows of other processes, front to back, in overlay
@@ -1635,7 +1780,13 @@ unsafe fn window_bounds(hwnd: HWND) -> Option<RECT> {
     // Suspended UWP apps and windows on other virtual desktops are cloaked.
     let mut cloaked = 0u32;
     let size = std::mem::size_of::<u32>() as u32;
-    if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut c_void, size).is_ok()
+    if DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_CLOAKED,
+        &mut cloaked as *mut u32 as *mut c_void,
+        size,
+    )
+    .is_ok()
         && cloaked != 0
     {
         return None;
@@ -1649,7 +1800,14 @@ unsafe fn window_bounds(hwnd: HWND) -> Option<RECT> {
     // The extended frame excludes the invisible resize borders.
     let mut r = RECT::default();
     let size = std::mem::size_of::<RECT>() as u32;
-    if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut c_void, size).is_err() {
+    if DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut r as *mut RECT as *mut c_void,
+        size,
+    )
+    .is_err()
+    {
         GetWindowRect(hwnd, &mut r).ok()?;
     }
     (!is_empty(r)).then_some(r)
@@ -1729,8 +1887,17 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         .map(to_local)
         .filter(|r| intersect(*r, monitor_rect) == *r && !is_empty(*r))
         .unwrap_or_else(|| {
-            let (mw, mh) = (monitor_rect.right - monitor_rect.left, monitor_rect.bottom - monitor_rect.top);
-            let r = place(monitor_rect.left + mw / 4, monitor_rect.top + mh / 4, mw / 2, mh / 2, monitor_rect);
+            let (mw, mh) = (
+                monitor_rect.right - monitor_rect.left,
+                monitor_rect.bottom - monitor_rect.top,
+            );
+            let r = place(
+                monitor_rect.left + mw / 4,
+                monitor_rect.top + mh / 4,
+                mw / 2,
+                mh / 2,
+                monitor_rect,
+            );
             match ASPECTS[aspect].1 {
                 Some(ratio) => apply_ratio(r, ratio, monitor_rect),
                 None => r,

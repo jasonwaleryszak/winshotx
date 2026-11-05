@@ -47,7 +47,11 @@ unsafe fn list(flow: EDataFlow) -> Result<Vec<Device>> {
             .and_then(|store| store.GetValue(&PKEY_Device_FriendlyName))
             .map(|v| v.to_string())
             .unwrap_or_default();
-        let name = if name.is_empty() { "Microphone".to_string() } else { name };
+        let name = if name.is_empty() {
+            "Microphone".to_string()
+        } else {
+            name
+        };
         out.push(Device { id, name });
     }
     Ok(out)
@@ -112,12 +116,14 @@ impl Capture {
             while self.capture.GetNextPacketSize()? > 0 {
                 let mut data = std::ptr::null_mut();
                 let (mut frames, mut flags) = (0u32, 0u32);
-                self.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
+                self.capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
                 let n = (frames * CHANNELS) as usize;
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
                     self.buffer.extend(std::iter::repeat(0.0).take(n));
                 } else {
-                    self.buffer.extend(std::slice::from_raw_parts(data as *const f32, n));
+                    self.buffer
+                        .extend(std::slice::from_raw_parts(data as *const f32, n));
                 }
                 self.capture.ReleaseBuffer(frames)?;
             }
