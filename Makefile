@@ -4,22 +4,23 @@ CARGO ?= cargo
 
 all: build
 
-build:
+# A running instance locks the exe and holds the hotkey, so stop it first.
+build: stop
 	$(CARGO) build --release
 
-debug:
+debug: stop
 	$(CARGO) build
 
 # Debug build runs as a console app, so Ctrl+C stops it.
-run:
+run: stop
 	$(CARGO) run
 
-# Release build has no console; use `make stop` to end it.
-run-release:
+# Release build has no console; quit from the tray icon or use `make stop`.
+run-release: stop
 	$(CARGO) run --release
 
 stop:
-	-taskkill /IM winshotx.exe /F
+	@taskkill /IM winshotx.exe /F >NUL 2>&1 || exit 0
 
 check:
 	$(CARGO) check

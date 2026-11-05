@@ -1,19 +1,25 @@
 // Release builds have no console window; debug builds keep one so Ctrl+C works.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
+mod tray;
+
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::core::{w, Error, Result, HSTRING, PCWSTR, PWSTR, VARIANT};
-use windows::Win32::Foundation::{GlobalFree, E_FAIL, GENERIC_WRITE, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    GlobalFree, BOOL, E_FAIL, GENERIC_WRITE, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::StructuredStorage::{IPropertyBag2, PROPBAG2};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
+use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT};
@@ -186,19 +192,37 @@ fn main() -> Result<()> {
             return Err(e);
         }
 
+        let tray = tray::Tray::new(instance)?;
+        // In debug builds Ctrl+C would otherwise kill the process and leave a
+        // ghost tray icon behind.
+        let _ = SetConsoleCtrlHandler(Some(on_console_ctrl), true);
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             if msg.message == WM_HOTKEY && msg.wParam.0 == HOTKEY_ID as usize {
-                if let Err(e) = start_capture(instance) {
-                    show_error(&format!("Failed to start capture:\n\n{e}"));
-                }
+                capture();
                 continue;
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        finish(false);
+        drop(tray);
     }
     Ok(())
+}
+
+unsafe extern "system" fn on_console_ctrl(_ctrl_type: u32) -> BOOL {
+    tray::request_quit();
+    TRUE
+}
+
+/// Opens the selection overlay, reporting any failure to the user.
+fn capture() {
+    let result = unsafe { GetModuleHandleW(None).and_then(|m| start_capture(m.into())) };
+    if let Err(e) = result {
+        show_error(&format!("Failed to start capture:\n\n{e}"));
+    }
 }
 
 unsafe fn start_capture(instance: HINSTANCE) -> Result<()> {
