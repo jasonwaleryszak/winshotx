@@ -172,7 +172,7 @@ impl Fonts {
     unsafe fn new(scale: f32) -> Self {
         Self {
             label: font(12.0 * scale, 400),
-            value: font(15.0 * scale, 600),
+            value: font(14.0 * scale, 600),
             item: font(13.0 * scale, 400),
         }
     }
