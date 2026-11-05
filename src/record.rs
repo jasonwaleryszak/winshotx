@@ -34,6 +34,74 @@ const AUDIO_LATENCY: f64 = 0.1;
 const MAX_BACKLOG: usize = (SAMPLE_RATE * CHANNELS) as usize / 4;
 const MIN_SIZE: i32 = 16;
 
+/// Trades file size for fidelity. Lower levels downscale large areas and
+/// encode at lower bitrates.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Quality {
+    Low,
+    Medium,
+    High,
+}
+
+impl Quality {
+    /// In the order shown in the menu.
+    pub const ALL: [Quality; 3] = [Quality::High, Quality::Medium, Quality::Low];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Quality::Low => "Low",
+            Quality::Medium => "Medium",
+            Quality::High => "High",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Quality::Low => "Up to 720p, smallest files",
+            Quality::Medium => "Up to 1080p",
+            Quality::High => "Source resolution",
+        }
+    }
+
+    /// Larger areas are scaled down to about this many pixels.
+    fn max_pixels(self) -> Option<f64> {
+        match self {
+            Quality::Low => Some(1280.0 * 720.0),
+            Quality::Medium => Some(1920.0 * 1080.0),
+            Quality::High => None,
+        }
+    }
+
+    /// Video bitrate in bit/s, from bits per pixel per frame and limits.
+    fn video_bitrate(self, w: u32, h: u32) -> u32 {
+        let (bpp, min, max) = match self {
+            Quality::Low => (0.03, 0.5e6, 4e6),
+            Quality::Medium => (0.05, 1e6, 12e6),
+            Quality::High => (0.1, 2e6, 40e6),
+        };
+        (w as f64 * h as f64 * FPS as f64 * bpp).clamp(min, max) as u32
+    }
+
+    /// AAC bytes per second: 96, 128 or 192 kbit/s, rates the encoder accepts.
+    fn audio_bytes_per_second(self) -> u32 {
+        match self {
+            Quality::Low => 12_000,
+            Quality::Medium => 16_000,
+            Quality::High => 24_000,
+        }
+    }
+
+    /// Encoded frame size for a `w` x `h` capture, with even dimensions as
+    /// the H.264 encoder requires.
+    fn output_size(self, w: i32, h: i32) -> (i32, i32) {
+        let k = match self.max_pixels() {
+            Some(max) if (w as f64 * h as f64) > max => (max / (w as f64 * h as f64)).sqrt(),
+            _ => 1.0,
+        };
+        (((w as f64 * k) as i32) & !1, ((h as f64 * k) as i32) & !1)
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
     /// Screen coordinates.
@@ -41,6 +109,7 @@ pub struct Settings {
     pub system_audio: bool,
     /// Endpoint ID of the microphone to record, if any.
     pub mic: Option<String>,
+    pub quality: Quality,
 }
 
 enum Command {
@@ -171,7 +240,10 @@ impl Clock {
 struct Session {
     writer: IMFSinkWriter,
     screen: HDC,
+    /// The captured area at full size.
     dib: Dib,
+    /// The frame scaled down to the output size, if it's smaller.
+    scaled: Option<Dib>,
     origin: POINT,
     sources: Vec<Capture>,
     /// Audio frames (one sample per channel) written so far.
@@ -196,8 +268,8 @@ fn context(what: &'static str) -> impl Fn(Error) -> Error {
 impl Session {
     fn new(settings: &Settings, path: &Path) -> Result<Self> {
         let r = settings.rect;
-        // The H.264 encoder needs even dimensions.
-        let (w, h) = ((r.right - r.left) & !1, (r.bottom - r.top) & !1);
+        let (cw, ch) = (r.right - r.left, r.bottom - r.top);
+        let (w, h) = settings.quality.output_size(cw, ch);
         if w < MIN_SIZE || h < MIN_SIZE {
             return Err(Error::new(
                 E_INVALIDARG,
@@ -216,15 +288,29 @@ impl Session {
         let has_audio = !sources.is_empty();
         let writer = unsafe {
             // Hardware encoders are much faster but not available everywhere.
-            create_writer(path, w as u32, h as u32, has_audio, true)
-                .or_else(|_| create_writer(path, w as u32, h as u32, has_audio, false))
+            let (w, h, q) = (w as u32, h as u32, settings.quality);
+            create_writer(path, w, h, q, has_audio, true)
+                .or_else(|_| create_writer(path, w, h, q, has_audio, false))
                 .map_err(context("Video encoder"))?
         };
 
-        let (screen, dib) = unsafe {
+        // Without scaling, capture just the even-sized part that's encoded.
+        let scaling = w < (cw & !1) || h < (ch & !1);
+        let (cw, ch) = if scaling { (cw, ch) } else { (w, h) };
+        let (screen, dib, scaled) = unsafe {
             let screen = GetDC(None);
-            match Dib::new(screen, w, h) {
-                Ok(dib) => (screen, dib),
+            let dibs = Dib::new(screen, cw, ch).and_then(|dib| {
+                if !scaling {
+                    return Ok((dib, None));
+                }
+                let scaled = Dib::new(screen, w, h)?;
+                // Halftone averages pixels, keeping text legible when shrunk.
+                let _ = SetStretchBltMode(scaled.dc, HALFTONE);
+                let _ = SetBrushOrgEx(scaled.dc, 0, 0, None);
+                Ok((dib, Some(scaled)))
+            });
+            match dibs {
+                Ok((dib, scaled)) => (screen, dib, scaled),
                 Err(e) => {
                     ReleaseDC(None, screen);
                     return Err(e);
@@ -241,6 +327,7 @@ impl Session {
             writer,
             screen,
             dib,
+            scaled,
             origin: POINT { x: r.left, y: r.top },
             sources,
             audio_written: 0,
@@ -297,17 +384,21 @@ impl Session {
     }
 
     fn write_frame(&mut self, time: i64) -> Result<()> {
-        let (w, h) = (self.dib.width, self.dib.height);
-        let bytes = (w * h * 4) as u32;
+        let (cw, ch) = (self.dib.width, self.dib.height);
         unsafe {
-            BitBlt(self.dib.dc, 0, 0, w, h, self.screen, self.origin.x, self.origin.y, SRCCOPY)?;
+            BitBlt(self.dib.dc, 0, 0, cw, ch, self.screen, self.origin.x, self.origin.y, SRCCOPY)?;
             self.draw_cursor();
+            if let Some(s) = &self.scaled {
+                let _ = StretchBlt(s.dc, 0, 0, s.width, s.height, self.dib.dc, 0, 0, cw, ch, SRCCOPY);
+            }
             let _ = GdiFlush();
 
+            let frame = self.scaled.as_ref().unwrap_or(&self.dib);
+            let bytes = (frame.width * frame.height * 4) as u32;
             let buffer = MFCreateMemoryBuffer(bytes)?;
             let mut dst = std::ptr::null_mut();
             buffer.Lock(&mut dst, None, None)?;
-            std::ptr::copy_nonoverlapping(self.dib.pixels().as_ptr() as *const u8, dst, bytes as usize);
+            std::ptr::copy_nonoverlapping(frame.pixels().as_ptr() as *const u8, dst, bytes as usize);
             buffer.Unlock()?;
             buffer.SetCurrentLength(bytes)?;
 
@@ -414,7 +505,14 @@ fn pack(hi: u32, lo: u32) -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 
-unsafe fn create_writer(path: &Path, w: u32, h: u32, audio: bool, hardware: bool) -> Result<IMFSinkWriter> {
+unsafe fn create_writer(
+    path: &Path,
+    w: u32,
+    h: u32,
+    quality: Quality,
+    audio: bool,
+    hardware: bool,
+) -> Result<IMFSinkWriter> {
     let mut attrs = None;
     MFCreateAttributes(&mut attrs, 1)?;
     let attrs = attrs.ok_or_else(Error::empty)?;
@@ -433,8 +531,7 @@ unsafe fn create_writer(path: &Path, w: u32, h: u32, audio: bool, hardware: bool
         Ok(t)
     };
     let out = video(&MFVideoFormat_H264)?;
-    let bitrate = (w as f64 * h as f64 * FPS as f64 * 0.1).clamp(2e6, 40e6) as u32;
-    out.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
+    out.SetUINT32(&MF_MT_AVG_BITRATE, quality.video_bitrate(w, h))?;
     out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
     let stream = writer.AddStream(&out)?;
     debug_assert_eq!(stream, VIDEO_STREAM);
@@ -454,8 +551,7 @@ unsafe fn create_writer(path: &Path, w: u32, h: u32, audio: bool, hardware: bool
             Ok(t)
         };
         let out = pcm(&MFAudioFormat_AAC)?;
-        // 192 kbit/s, one of the rates the AAC encoder accepts.
-        out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000)?;
+        out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, quality.audio_bytes_per_second())?;
         let stream = writer.AddStream(&out)?;
         debug_assert_eq!(stream, AUDIO_STREAM);
         let input = pcm(&MFAudioFormat_PCM)?;

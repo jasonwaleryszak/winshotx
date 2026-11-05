@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::audio::{self, Device};
 use crate::capture;
-use crate::record::Settings;
+use crate::record::{Quality, Settings};
 use crate::gfx::{
     contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin, union, Canvas,
     Color, Dib, Inside, RectF,
@@ -61,6 +61,7 @@ const NO_MICS_FOUND: &str = "No microphones found";
 /// Buttons on the recording island; the last one starts recording.
 const REC_SYSTEM_AUDIO: usize = 0;
 const REC_MIC: usize = 1;
+const REC_QUALITY: usize = 2;
 const ASPECTS: [(&str, Option<(i32, i32)>); 7] = [
     ("Freeform", None),
     ("1:1", Some((1, 1))),
@@ -79,6 +80,7 @@ thread_local! {
     static LAST_SYSTEM_AUDIO: Cell<bool> = const { Cell::new(false) };
     /// Endpoint ID of the microphone last chosen for recording.
     static LAST_MIC: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LAST_QUALITY: Cell<Quality> = const { Cell::new(Quality::Medium) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -92,6 +94,7 @@ enum Mode {
 enum Popup {
     Aspect,
     Mic,
+    Quality,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -120,6 +123,8 @@ enum Hit {
     RecButton(usize),
     /// 0 is "Do not record microphone", then one per microphone.
     MicItem(usize),
+    /// Index into `Quality::ALL`.
+    QualityItem(usize),
 }
 
 /// Which edges a resize handle moves: -1 left/top, 1 right/bottom, 0 neither.
@@ -210,7 +215,7 @@ struct Layout {
     /// Shown to the right of the others in Record mode, without recentring
     /// them, so the buttons don't jump when switching modes.
     record: RECT,
-    record_buttons: [RECT; 3],
+    record_buttons: [RECT; 4],
     record_divider: RECT,
     /// The rectangle the toolbar is attached to.
     target: RECT,
@@ -275,7 +280,7 @@ impl Layout {
             .map(|i| rect(dropdown.left + pad, dropdown.top + pad + i * item_h, item_w, item_h))
             .collect();
 
-        let record_w = 2 * pad + 3 * btn + bgap + px(12.0) + divider_w;
+        let record_w = 2 * pad + 4 * btn + 2 * bgap + px(12.0) + divider_w;
         let POINT { x: rx, y: ry } = record_origin(target, work, union(left, right), record_w, panel_h, scale);
         let record = rect(rx, ry, record_w, panel_h);
         let (rtop, rcy) = (ry + pad, ry + panel_h / 2);
@@ -283,6 +288,8 @@ impl Layout {
         let system_audio = rect(x, rtop, btn, btn);
         x += btn + bgap;
         let mic = rect(x, rtop, btn, btn);
+        x += btn + bgap;
+        let quality = rect(x, rtop, btn, btn);
         x += btn + px(6.0);
         let record_divider = rect(x, rcy - px(12.0), divider_w, px(24.0));
         x += divider_w + px(6.0);
@@ -299,7 +306,7 @@ impl Layout {
             dropdown,
             items,
             record,
-            record_buttons: [system_audio, mic, start],
+            record_buttons: [system_audio, mic, quality, start],
             record_divider,
             target,
         }
@@ -334,6 +341,10 @@ struct Menu {
     mic_popup: RECT,
     mic_items: Vec<RECT>,
     mic_separator: RECT,
+    quality: Quality,
+    /// Quality menu geometry: the panel and its rows.
+    quality_popup: RECT,
+    quality_items: Vec<RECT>,
     windows: Vec<(HWND, RECT)>,
     window: Option<usize>,
     /// The control whose tooltip is showing (shown after hovering a moment).
@@ -436,6 +447,7 @@ impl Menu {
         match self.dropdown {
             Some(Popup::Aspect) => r = union(r, self.layout.dropdown),
             Some(Popup::Mic) => r = union(r, self.mic_popup),
+            Some(Popup::Quality) => r = union(r, self.quality_popup),
             None => {}
         }
         if let Some((tip, _)) = self.tooltip_rect() {
@@ -468,6 +480,7 @@ impl Menu {
                 Some(i) => format!("Microphone: {}", self.mics[i].name),
                 None => "Microphone: Off".into(),
             }),
+            Hit::RecButton(REC_QUALITY) => Some(format!("Quality: {}", self.quality.name())),
             Hit::RecButton(_) => Some("Start Recording".into()),
             Hit::Field(Field::Width) => Some("Width".into()),
             Hit::Field(Field::Height) => Some("Height".into()),
@@ -675,7 +688,12 @@ impl Menu {
                     REC_MIC => self.mic_index().is_some(),
                     _ => false,
                 };
-                if on || (i == REC_MIC && self.dropdown == Some(Popup::Mic)) {
+                let open = match i {
+                    REC_MIC => self.dropdown == Some(Popup::Mic),
+                    REC_QUALITY => self.dropdown == Some(Popup::Quality),
+                    _ => false,
+                };
+                if on || open {
                     c.round_rect(r.into(), pill(r), BUTTON_ACTIVE);
                 } else if self.hover == Hit::RecButton(i) {
                     c.round_rect(r.into(), pill(r), BUTTON_HOVER);
@@ -684,6 +702,7 @@ impl Menu {
                 match i {
                     REC_SYSTEM_AUDIO => draw_speaker_icon(c, cx, cy, s, on),
                     REC_MIC => draw_mic_icon(c, cx, cy, s, on),
+                    REC_QUALITY => draw_quality_icon(c, cx, cy, s, self.quality),
                     _ => {
                         let rad = 7.0 * s;
                         let dot = RectF {
@@ -727,6 +746,27 @@ impl Menu {
                     _ => (self.mics[i - 1].name.as_str(), TEXT),
                 };
                 c.text(text, label, self.fonts.item, color, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+        }
+
+        if self.dropdown == Some(Popup::Quality) {
+            panel(c, self.quality_popup, 14.0 * s);
+            for (i, (&r, q)) in self.quality_items.iter().zip(Quality::ALL).enumerate() {
+                if self.hover == Hit::QualityItem(i) {
+                    c.round_rect(r.into(), 8.0 * s, BUTTON_HOVER);
+                }
+                if q == self.quality {
+                    draw_check(c, r, s);
+                }
+                let icon_x = r.left as f32 + 36.0 * s;
+                draw_quality_icon(c, icon_x, (r.top + r.bottom) as f32 / 2.0, s, q);
+                let label = RECT {
+                    left: r.left + self.px(52.0),
+                    right: r.right - self.px(10.0),
+                    ..r
+                };
+                c.text(q.name(), label, self.fonts.item, TEXT, DT_LEFT | DT_VCENTER);
+                c.text(q.description(), label, self.fonts.label, TEXT_DIM, DT_RIGHT | DT_VCENTER);
             }
         }
 
@@ -778,6 +818,14 @@ impl Menu {
                     Some(i) if !(empty && i == 1) => return Hit::MicItem(i),
                     _ if contains(self.mic_popup, p) => return Hit::Toolbar,
                     _ => {}
+                }
+            }
+            Some(Popup::Quality) => {
+                if let Some(i) = self.quality_items.iter().position(|r| contains(*r, p)) {
+                    return Hit::QualityItem(i);
+                }
+                if contains(self.quality_popup, p) {
+                    return Hit::Toolbar;
                 }
             }
             None => {}
@@ -851,7 +899,14 @@ impl Menu {
             rect: self.area,
             system_audio: self.system_audio,
             mic: self.mic_index().map(|i| self.mics[i].id.clone()),
+            quality: self.quality,
         }))
+    }
+
+    fn set_quality(&mut self, item: usize) {
+        self.quality = Quality::ALL[item];
+        LAST_QUALITY.set(self.quality);
+        self.dirty = true;
     }
 
     fn set_mic(&mut self, item: usize) {
@@ -880,7 +935,40 @@ impl Menu {
         self.layout = Layout::new(self.area, self.work, self.scale);
         if self.mode == Mode::Record {
             self.layout_mic_popup();
+            self.layout_quality_popup();
         }
+    }
+
+    /// Lays out the quality menu above its button, wide enough for each
+    /// level's name and description side by side.
+    fn layout_quality_popup(&mut self) {
+        let (pad, item_h) = (self.px(6.0), self.px(28.0));
+        let text_w = Quality::ALL
+            .iter()
+            .map(|q| text_width(self.fonts.item, q.name()) + text_width(self.fonts.label, q.description()))
+            .max()
+            .unwrap_or(0);
+        let item_w = (text_w + self.px(86.0)).max(self.px(220.0));
+        let w = item_w + 2 * pad;
+        let h = 2 * pad + Quality::ALL.len() as i32 * item_h;
+
+        let anchor = self.layout.record_buttons[REC_QUALITY];
+        let left = (anchor.left - pad).clamp(self.monitor.left, (self.monitor.right - w).max(self.monitor.left));
+        let top = self.popup_top(self.layout.record, h, self.px(10.0));
+        self.quality_popup = RECT {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+        };
+        self.quality_items = (0..Quality::ALL.len() as i32)
+            .map(|i| RECT {
+                left: left + pad,
+                top: top + pad + i * item_h,
+                right: left + pad + item_w,
+                bottom: top + pad + (i + 1) * item_h,
+            })
+            .collect();
     }
 
     /// Lays out the microphone menu above its button, sized to fit the
@@ -943,6 +1031,7 @@ impl Menu {
         if mode == Mode::Record {
             self.mics = audio::microphones();
             self.layout_mic_popup();
+            self.layout_quality_popup();
         }
         if mode == Mode::Window {
             self.windows = list_windows(self.origin);
@@ -1026,6 +1115,7 @@ impl Menu {
             match hit {
                 Hit::Item(i) => self.set_aspect(i),
                 Hit::MicItem(i) => self.set_mic(i),
+                Hit::QualityItem(i) => self.set_quality(i),
                 _ => {}
             }
             return Action::None;
@@ -1061,6 +1151,11 @@ impl Menu {
                 self.dirty = true;
                 Action::None
             }
+            Hit::RecButton(REC_QUALITY) => {
+                self.dropdown = Some(Popup::Quality);
+                self.dirty = true;
+                Action::None
+            }
             Hit::RecButton(_) => self.record_target(),
             Hit::Field(f) => {
                 self.begin_edit(f);
@@ -1071,7 +1166,7 @@ impl Menu {
                 self.dirty = true;
                 Action::None
             }
-            Hit::Toolbar | Hit::Item(_) | Hit::MicItem(_) => Action::None,
+            Hit::Toolbar | Hit::Item(_) | Hit::MicItem(_) | Hit::QualityItem(_) => Action::None,
             Hit::None if self.mode == Mode::Window => self.window_target(),
             Hit::None => {
                 let orig = self.area;
@@ -1470,6 +1565,34 @@ fn draw_mic_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, on: bool) {
     }
 }
 
+/// A 5x5 lattice that thins out evenly at lower quality, staying symmetric:
+/// a checkerboard at High, every other cell at Medium, and the corners and
+/// centre (like a die's five) at Low. Cell edges are snapped to whole pixels
+/// so the blocks stay crisp.
+fn draw_quality_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, quality: Quality) {
+    const CELLS: i32 = 5;
+    let filled = |row: i32, col: i32| match quality {
+        Quality::High => (row + col) % 2 == 0,
+        Quality::Medium => row % 2 == 0 && col % 2 == 0,
+        Quality::Low => (row % 4 == 0 && col % 4 == 0) || (row == 2 && col == 2),
+    };
+    // 3 px cells at 100% scale.
+    let size = (15.0 * s).round();
+    let (l, t) = ((cx - size / 2.0).round(), (cy - size / 2.0).round());
+    let edge = |i: i32| (i as f32 * size / CELLS as f32).round();
+    for row in 0..CELLS {
+        for col in (0..CELLS).filter(|&col| filled(row, col)) {
+            let r = RectF {
+                l: l + edge(col),
+                t: t + edge(row),
+                r: l + edge(col + 1),
+                b: t + edge(row + 1),
+            };
+            c.round_rect(r, 0.0, TEXT);
+        }
+    }
+}
+
 fn draw_crop_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, color: Color) {
     let t = 1.6 * s;
     let (a, b) = (4.0 * s, 8.0 * s);
@@ -1655,6 +1778,9 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         mic_popup: RECT::default(),
         mic_items: Vec::new(),
         mic_separator: RECT::default(),
+        quality: LAST_QUALITY.get(),
+        quality_popup: RECT::default(),
+        quality_items: Vec::new(),
         windows: Vec::new(),
         window: None,
         tooltip: None,
