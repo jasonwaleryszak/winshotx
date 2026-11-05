@@ -19,11 +19,12 @@ use crate::autostart;
 const CLASS_NAME: PCWSTR = w!("WinShotXTray");
 const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
-const TOOLTIP: &str = "WinShotX (Alt+Shift+4)";
+const TOOLTIP: &str = "WinShotX (Alt+Shift+4, Alt+Shift+5)";
 
 const CMD_CAPTURE: usize = 1;
 const CMD_AUTOSTART: usize = 2;
 const CMD_QUIT: usize = 3;
+const CMD_MENU: usize = 4;
 
 /// Tray window handle, readable from other threads (e.g. the console Ctrl+C handler).
 static TRAY_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -89,6 +90,11 @@ impl Drop for Tray {
     }
 }
 
+/// The tray window, also used as the clipboard owner.
+pub fn hwnd() -> HWND {
+    HWND(TRAY_HWND.load(Ordering::Acquire))
+}
+
 /// Asks the UI thread to exit cleanly. Safe to call from any thread.
 pub fn request_quit() {
     let hwnd = TRAY_HWND.load(Ordering::Acquire);
@@ -146,6 +152,8 @@ unsafe fn show_menu(hwnd: HWND) {
     let autostart_on = autostart::is_enabled();
     let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
     let _ = AppendMenuW(menu, MF_STRING, CMD_CAPTURE, w!("Capture Region\tAlt+Shift+4"));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_MENU, w!("Capture...\tAlt+Shift+5"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING | check, CMD_AUTOSTART, w!("Start with Windows"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit WinShotX"));
@@ -167,7 +175,8 @@ unsafe fn show_menu(hwnd: HWND) {
     let _ = DestroyMenu(menu);
 
     match cmd.0 as usize {
-        CMD_CAPTURE => crate::capture(),
+        CMD_CAPTURE => crate::overlay::open(),
+        CMD_MENU => crate::menu::open(),
         CMD_AUTOSTART => {
             if let Err(e) = autostart::set_enabled(!autostart_on) {
                 crate::show_error(&format!("Failed to update Start with Windows:\n\n{e}"));
