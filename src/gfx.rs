@@ -182,7 +182,15 @@ pub enum Inside {
 /// `work`: just below the target, otherwise just above it, otherwise inside
 /// it as `inside` says. The first `centred` pixels of its width are centred
 /// on the target.
-pub fn toolbar_origin(target: RECT, work: RECT, w: i32, h: i32, centred: i32, inside: Inside, scale: f32) -> POINT {
+pub fn toolbar_origin(
+    target: RECT,
+    work: RECT,
+    w: i32,
+    h: i32,
+    centred: i32,
+    inside: Inside,
+    scale: f32,
+) -> POINT {
     let px = |v: f32| (v * scale).round() as i32;
     let (inset, gap, margin) = (px(28.0), px(12.0), px(8.0));
     let inner = intersect(target, work);
@@ -198,8 +206,14 @@ pub fn toolbar_origin(target: RECT, work: RECT, w: i32, h: i32, centred: i32, in
     };
     let x = (target.left + target.right - centred) / 2;
     POINT {
-        x: x.clamp(work.left + margin, (work.right - margin - w).max(work.left + margin)),
-        y: y.clamp(work.top + margin, (work.bottom - margin - h).max(work.top + margin)),
+        x: x.clamp(
+            work.left + margin,
+            (work.right - margin - w).max(work.left + margin),
+        ),
+        y: y.clamp(
+            work.top + margin,
+            (work.bottom - margin - h).max(work.top + margin),
+        ),
     }
 }
 
@@ -243,7 +257,11 @@ fn sd_round_rect(x: f32, y: f32, r: RectF, radius: f32) -> f32 {
 fn dist_segment(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
     let (px, py, dx, dy) = (x - ax, y - ay, bx - ax, by - ay);
     let len2 = dx * dx + dy * dy;
-    let h = if len2 > 0.0 { ((px * dx + py * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let h = if len2 > 0.0 {
+        ((px * dx + py * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (px - dx * h).hypot(py - dy * h)
 }
 
@@ -299,7 +317,6 @@ impl<'a> Canvas<'a> {
         }
     }
 
-
     /// Blends `c` over every pixel near `bounds`, weighted by `coverage`
     /// (0.0-1.0) evaluated at the pixel centre.
     fn shade(&mut self, bounds: RectF, c: Color, coverage: impl Fn(f32, f32) -> f32) {
@@ -337,13 +354,18 @@ impl<'a> Canvas<'a> {
             b: bounds.b + grow,
         };
         self.shade(bounds, c, |x, y| {
-            let d = parts.iter().map(|(r, rad)| sd_round_rect(x, y, *r, *rad)).fold(f32::MAX, f32::min);
+            let d = parts
+                .iter()
+                .map(|(r, rad)| sd_round_rect(x, y, *r, *rad))
+                .fold(f32::MAX, f32::min);
             (0.5 - (d - grow)).clamp(0.0, 1.0)
         });
     }
 
     pub fn round_rect(&mut self, r: RectF, radius: f32, c: Color) {
-        self.shade(r, c, |x, y| (0.5 - sd_round_rect(x, y, r, radius)).clamp(0.0, 1.0));
+        self.shade(r, c, |x, y| {
+            (0.5 - sd_round_rect(x, y, r, radius)).clamp(0.0, 1.0)
+        });
     }
 
     /// A rounded-rectangle outline lying just inside `r`.
@@ -398,7 +420,14 @@ impl<'a> Canvas<'a> {
 
     /// Draws single-line text. GDI can't write alpha, so the text is rendered
     /// white-on-black into a scratch bitmap and used as a coverage mask.
-    pub unsafe fn text(&mut self, s: &str, r: RECT, font: HFONT, c: Color, format: DRAW_TEXT_FORMAT) {
+    pub unsafe fn text(
+        &mut self,
+        s: &str,
+        r: RECT,
+        font: HFONT,
+        c: Color,
+        format: DRAW_TEXT_FORMAT,
+    ) {
         let visible = intersect(r, self.clip);
         if is_empty(visible) {
             return;
@@ -417,7 +446,12 @@ impl<'a> Canvas<'a> {
             right: w,
             bottom: h,
         };
-        DrawTextW(mask.dc, &mut wide, &mut rc, format | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            mask.dc,
+            &mut wide,
+            &mut rc,
+            format | DT_SINGLELINE | DT_NOPREFIX,
+        );
         SelectObject(mask.dc, old);
         let _ = GdiFlush();
 

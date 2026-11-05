@@ -50,7 +50,17 @@ impl Overlay {
         let _ = BitBlt(back, 0, 0, w, h, self.shot.dc, 0, 0, SRCCOPY);
         if let Some(r) = self.selection() {
             let (sw, sh) = (r.right - r.left, r.bottom - r.top);
-            let _ = BitBlt(back, r.left, r.top, sw, sh, self.tinted.dc, r.left, r.top, SRCCOPY);
+            let _ = BitBlt(
+                back,
+                r.left,
+                r.top,
+                sw,
+                sh,
+                self.tinted.dc,
+                r.left,
+                r.top,
+                SRCCOPY,
+            );
             // Drawn on the selection's outermost pixels so the edges pass exactly
             // through the anchor and the crosshair hotspot.
             FrameRect(back, &r, HBRUSH(GetStockObject(WHITE_BRUSH).0));
@@ -109,8 +119,22 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
     let screen = GetDC(None);
     let buffers = (|| -> Result<_> {
         let shot = Dib::new(screen, width, height)?;
-        BitBlt(shot.dc, 0, 0, width, height, screen, x, y, ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0))?;
-        Ok((shot, Dib::new(screen, width, height)?, Dib::new(screen, width, height)?))
+        BitBlt(
+            shot.dc,
+            0,
+            0,
+            width,
+            height,
+            screen,
+            x,
+            y,
+            ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0),
+        )?;
+        Ok((
+            shot,
+            Dib::new(screen, width, height)?,
+            Dib::new(screen, width, height)?,
+        ))
     })();
     ReleaseDC(None, screen);
     let (shot, mut tinted, back) = buffers?;

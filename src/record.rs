@@ -15,7 +15,8 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, HICON, ICONINFO,
+    DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, HICON,
+    ICONINFO,
 };
 
 use crate::audio::{Capture, CHANNELS, SAMPLE_RATE};
@@ -142,7 +143,10 @@ impl Recorder {
                 let _ = thread.join();
                 Err(e)
             }
-            Err(_) => Err(Error::new(E_FAIL, "The recording thread exited unexpectedly")),
+            Err(_) => Err(Error::new(
+                E_FAIL,
+                "The recording thread exited unexpectedly",
+            )),
         }
     }
 
@@ -176,7 +180,12 @@ impl Drop for Recorder {
     }
 }
 
-fn run(settings: Settings, path: PathBuf, rx: Receiver<Command>, ready: mpsc::SyncSender<Result<()>>) {
+fn run(
+    settings: Settings,
+    path: PathBuf,
+    rx: Receiver<Command>,
+    ready: mpsc::SyncSender<Result<()>>,
+) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Err(e) = MFStartup(MF_VERSION, MFSTARTUP_FULL) {
@@ -328,7 +337,10 @@ impl Session {
             screen,
             dib,
             scaled,
-            origin: POINT { x: r.left, y: r.top },
+            origin: POINT {
+                x: r.left,
+                y: r.top,
+            },
             sources,
             audio_written: 0,
             next_frame: 0,
@@ -386,10 +398,32 @@ impl Session {
     fn write_frame(&mut self, time: i64) -> Result<()> {
         let (cw, ch) = (self.dib.width, self.dib.height);
         unsafe {
-            BitBlt(self.dib.dc, 0, 0, cw, ch, self.screen, self.origin.x, self.origin.y, SRCCOPY)?;
+            BitBlt(
+                self.dib.dc,
+                0,
+                0,
+                cw,
+                ch,
+                self.screen,
+                self.origin.x,
+                self.origin.y,
+                SRCCOPY,
+            )?;
             self.draw_cursor();
             if let Some(s) = &self.scaled {
-                let _ = StretchBlt(s.dc, 0, 0, s.width, s.height, self.dib.dc, 0, 0, cw, ch, SRCCOPY);
+                let _ = StretchBlt(
+                    s.dc,
+                    0,
+                    0,
+                    s.width,
+                    s.height,
+                    self.dib.dc,
+                    0,
+                    0,
+                    cw,
+                    ch,
+                    SRCCOPY,
+                );
             }
             let _ = GdiFlush();
 
@@ -398,7 +432,11 @@ impl Session {
             let buffer = MFCreateMemoryBuffer(bytes)?;
             let mut dst = std::ptr::null_mut();
             buffer.Lock(&mut dst, None, None)?;
-            std::ptr::copy_nonoverlapping(frame.pixels().as_ptr() as *const u8, dst, bytes as usize);
+            std::ptr::copy_nonoverlapping(
+                frame.pixels().as_ptr() as *const u8,
+                dst,
+                bytes as usize,
+            );
             buffer.Unlock()?;
             buffer.SetCurrentLength(bytes)?;
 
@@ -439,7 +477,17 @@ impl Session {
         };
         let x = info.ptScreenPos.x - hot.x - self.origin.x;
         let y = info.ptScreenPos.y - hot.y - self.origin.y;
-        let _ = DrawIconEx(self.dib.dc, x, y, HICON(info.hCursor.0), 0, 0, 0, None, DI_NORMAL);
+        let _ = DrawIconEx(
+            self.dib.dc,
+            x,
+            y,
+            HICON(info.hCursor.0),
+            0,
+            0,
+            0,
+            None,
+            DI_NORMAL,
+        );
     }
 
     /// Discards audio captured while paused.
@@ -551,12 +599,18 @@ unsafe fn create_writer(
             Ok(t)
         };
         let out = pcm(&MFAudioFormat_AAC)?;
-        out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, quality.audio_bytes_per_second())?;
+        out.SetUINT32(
+            &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+            quality.audio_bytes_per_second(),
+        )?;
         let stream = writer.AddStream(&out)?;
         debug_assert_eq!(stream, AUDIO_STREAM);
         let input = pcm(&MFAudioFormat_PCM)?;
         input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, CHANNELS * 2)?;
-        input.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, SAMPLE_RATE * CHANNELS * 2)?;
+        input.SetUINT32(
+            &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+            SAMPLE_RATE * CHANNELS * 2,
+        )?;
         writer.SetInputMediaType(stream, &input, None)?;
     }
 

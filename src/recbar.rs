@@ -23,8 +23,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{
-    contains, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin, union,
-    Inside,
+    contains, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin,
+    union, Inside,
 };
 use crate::gfx::{Canvas, Color, Dib, RectF};
 use crate::menu::{font, BUTTON_HOVER, PANEL_BORDER, PANEL_FILL, TEXT, TOOLTIP_DELAY_MS};
@@ -372,7 +372,11 @@ fn draw_icon(c: &mut Canvas, i: usize, paused: bool, cx: f32, cy: f32, s: f32) {
         }
 
         _ => {
-            c.polyline(&[(cx - 7.5 * s, cy - 5.0 * s), (cx + 7.5 * s, cy - 5.0 * s)], t, TEXT);
+            c.polyline(
+                &[(cx - 7.5 * s, cy - 5.0 * s), (cx + 7.5 * s, cy - 5.0 * s)],
+                t,
+                TEXT,
+            );
             c.polyline(
                 &[
                     (cx - 2.5 * s, cy - 5.0 * s),
@@ -443,8 +447,14 @@ extern "system" fn dim_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 /// A translucent black, click-through window over the virtual screen with
 /// a hole for `area` (screen coordinates).
 unsafe fn create_dim(instance: HINSTANCE, area: RECT) -> Result<HWND> {
-    let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
-    let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    let (x, y) = (
+        GetSystemMetrics(SM_XVIRTUALSCREEN),
+        GetSystemMetrics(SM_YVIRTUALSCREEN),
+    );
+    let (w, h) = (
+        GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    );
     let hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         DIM_CLASS_NAME,
@@ -607,17 +617,27 @@ unsafe fn open(settings: Settings) -> Result<()> {
 /// A pill-shaped island attached to the recorded area (see
 /// `toolbar_origin`): the stop button with the timer, then pause and delete,
 /// with dividers.
-fn layout(area: RECT, work: RECT, scale: f32, time_font: HFONT, time: &str) -> (RECT, [RECT; 3], [RECT; 2]) {
+fn layout(
+    area: RECT,
+    work: RECT,
+    scale: f32,
+    time_font: HFONT,
+    time: &str,
+) -> (RECT, [RECT; 3], [RECT; 2]) {
     let px = |v: f32| (v * scale).round() as i32;
     let (pad, btn, gap) = (px(6.0), px(36.0), px(4.0));
     let divider_w = px(1.0).max(1);
     // Sized to the time with every digit as 0, so the width only changes
     // when a digit is added (at 10:00).
-    let template: String = time.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
+    let template: String = time
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '0' } else { c })
+        .collect();
     let stop_w = px(34.0) + text_width(time_font, &template) + px(12.0);
     let width = 2 * pad + stop_w + 2 * (2 * gap + divider_w + btn);
     let height = btn + 2 * pad;
-    let POINT { x: left, y: top } = toolbar_origin(area, work, width, height, width, Inside::Bottom, scale);
+    let POINT { x: left, y: top } =
+        toolbar_origin(area, work, width, height, width, Inside::Bottom, scale);
     let island = RECT {
         left,
         top,

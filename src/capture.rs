@@ -6,17 +6,25 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::core::{w, Error, Result, PCWSTR, PWSTR, VARIANT};
-use windows::Win32::Foundation::{GlobalFree, E_FAIL, E_INVALIDARG, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, RECT, TRUE};
+use windows::Win32::Foundation::{
+    GlobalFree, E_FAIL, E_INVALIDARG, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, RECT, TRUE,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::StructuredStorage::{IPropertyBag2, PROPBAG2};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
+};
 use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::Sleep;
-use windows::Win32::UI::Shell::{FOLDERID_Desktop, SHGetKnownFolderPath, DROPFILES, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{
+    FOLDERID_Desktop, SHGetKnownFolderPath, DROPFILES, KF_FLAG_DEFAULT,
+};
 
 use crate::gfx::Dib;
 
@@ -58,7 +66,17 @@ pub fn grab(r: RECT) -> Result<Image> {
         let screen = GetDC(None);
         let result = (|| -> Result<Image> {
             let dib = Dib::new(screen, w, h)?;
-            BitBlt(dib.dc, 0, 0, w, h, screen, r.left, r.top, ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0))?;
+            BitBlt(
+                dib.dc,
+                0,
+                0,
+                w,
+                h,
+                screen,
+                r.left,
+                r.top,
+                ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0),
+            )?;
             let all = RECT {
                 left: 0,
                 top: 0,
@@ -202,7 +220,11 @@ fn copy_file_to_clipboard(owner: HWND, path: &Path) -> Result<()> {
             return Err(Error::from_win32());
         }
         std::ptr::copy_nonoverlapping(&header as *const _ as *const u8, dst, header_size);
-        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dst.add(header_size), wide.len() * 2);
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr() as *const u8,
+            dst.add(header_size),
+            wide.len() * 2,
+        );
         let _ = GlobalUnlock(mem);
         set_clipboard(owner, CF_HDROP.0 as u32, mem)
     }
