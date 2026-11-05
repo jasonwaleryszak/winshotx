@@ -1,21 +1,22 @@
 //! Grabbing screen pixels and delivering them: clipboard plus a JPEG file.
+//! Recordings are delivered here too, as a file on the clipboard.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::core::{w, Error, Result, PCWSTR, PWSTR, VARIANT};
-use windows::Win32::Foundation::{GlobalFree, E_FAIL, E_INVALIDARG, GENERIC_WRITE, HANDLE, HWND, RECT};
+use windows::core::{w, Error, Result, GUID, PCWSTR, PWSTR, VARIANT};
+use windows::Win32::Foundation::{GlobalFree, E_FAIL, E_INVALIDARG, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::StructuredStorage::{IPropertyBag2, PROPBAG2};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT};
-use windows::Win32::System::Ole::CF_DIB;
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::Sleep;
-use windows::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, DROPFILES, KF_FLAG_DEFAULT};
 
 use crate::gfx::Dib;
 
@@ -76,14 +77,22 @@ pub fn deliver(image: &Image) {
     if let Err(e) = copy_to_clipboard(crate::tray::hwnd(), image) {
         crate::show_error(&format!("Failed to copy screenshot to clipboard:\n\n{e}"));
     }
-    if let Err(e) = output_path().and_then(|path| save_jpeg(&path, image)) {
+    if let Err(e) = output_path(&FOLDERID_Pictures, "jpg").and_then(|path| save_jpeg(&path, image)) {
         crate::show_error(&format!("Failed to save screenshot:\n\n{e}"));
     }
 }
 
-fn output_path() -> Result<PathBuf> {
+/// Puts a saved recording on the clipboard, so it can be pasted as a file.
+pub fn deliver_file(path: &Path) {
+    if let Err(e) = copy_file_to_clipboard(crate::tray::hwnd(), path) {
+        crate::show_error(&format!("Failed to copy recording to clipboard:\n\n{e}"));
+    }
+}
+
+/// A new, timestamped file name in `<known folder>\WinShotX`.
+pub fn output_path(folder: &GUID, ext: &str) -> Result<PathBuf> {
     let dir = unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None)?;
+        let p = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None)?;
         let s = p.to_string();
         CoTaskMemFree(Some(p.0 as *const c_void));
         PathBuf::from(s.map_err(|e| Error::new(E_FAIL, e.to_string()))?).join("WinShotX")
@@ -96,10 +105,10 @@ fn output_path() -> Result<PathBuf> {
         "WinShotX {:04}-{:02}-{:02} {:02}.{:02}.{:02}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     );
-    let mut path = dir.join(format!("{stem}.jpg"));
+    let mut path = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
     while path.exists() {
-        path = dir.join(format!("{stem} ({n}).jpg"));
+        path = dir.join(format!("{stem} ({n}).{ext}"));
         n += 1;
     }
     Ok(path)
@@ -171,28 +180,57 @@ fn copy_to_clipboard(owner: HWND, image: &Image) -> Result<()> {
             std::ptr::copy_nonoverlapping(src_row.as_ptr(), dst_row, row);
         }
         let _ = GlobalUnlock(mem);
+        set_clipboard(owner, CF_DIB.0 as u32, mem)
+    }
+}
 
-        // Another app may briefly hold the clipboard open; retry a few times.
-        let mut opened = OpenClipboard(owner);
-        for _ in 0..10 {
-            if opened.is_ok() {
-                break;
-            }
-            Sleep(20);
-            opened = OpenClipboard(owner);
-        }
-        if let Err(e) = opened {
+/// Places a file on the clipboard as CF_HDROP, like Explorer's Copy.
+fn copy_file_to_clipboard(owner: HWND, path: &Path) -> Result<()> {
+    let header = DROPFILES {
+        pFiles: std::mem::size_of::<DROPFILES>() as u32,
+        fWide: TRUE,
+        ..Default::default()
+    };
+    // The list of paths ends with an empty string, hence two terminators.
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
+    let header_size = std::mem::size_of::<DROPFILES>();
+    let total = header_size + wide.len() * 2;
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total)?;
+        let dst = GlobalLock(mem) as *mut u8;
+        if dst.is_null() {
             let _ = GlobalFree(mem);
-            return Err(e);
+            return Err(Error::from_win32());
         }
+        std::ptr::copy_nonoverlapping(&header as *const _ as *const u8, dst, header_size);
+        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dst.add(header_size), wide.len() * 2);
+        let _ = GlobalUnlock(mem);
+        set_clipboard(owner, CF_HDROP.0 as u32, mem)
+    }
+}
 
-        let result = EmptyClipboard().and_then(|_| SetClipboardData(CF_DIB.0 as u32, HANDLE(mem.0)));
-        let _ = CloseClipboard();
-        if let Err(e) = result {
-            // Ownership only transfers to the system on success.
-            let _ = GlobalFree(mem);
-            return Err(e);
+/// Replaces the clipboard contents with `mem`, which is freed on failure.
+unsafe fn set_clipboard(owner: HWND, format: u32, mem: HGLOBAL) -> Result<()> {
+    // Another app may briefly hold the clipboard open; retry a few times.
+    let mut opened = OpenClipboard(owner);
+    for _ in 0..10 {
+        if opened.is_ok() {
+            break;
         }
+        Sleep(20);
+        opened = OpenClipboard(owner);
+    }
+    if let Err(e) = opened {
+        let _ = GlobalFree(mem);
+        return Err(e);
+    }
+
+    let result = EmptyClipboard().and_then(|_| SetClipboardData(format, HANDLE(mem.0)));
+    let _ = CloseClipboard();
+    if let Err(e) = result {
+        // Ownership only transfers to the system on success.
+        let _ = GlobalFree(mem);
+        return Err(e);
     }
     Ok(())
 }

@@ -334,6 +334,20 @@ impl<'a> Canvas<'a> {
         });
     }
 
+    /// A circular arc from angle `a0` to `a1` (degrees, clockwise from +x,
+    /// since y points down).
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, a0: f32, a1: f32, width: f32, c: Color) {
+        let steps = (((a1 - a0).abs() / 10.0).ceil() as usize).max(2);
+        let pts: Vec<(f32, f32)> = (0..=steps)
+            .map(|i| {
+                let a = (a0 + (a1 - a0) * i as f32 / steps as f32).to_radians();
+                (cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect();
+        self.polyline(&pts, width, c);
+    }
+
     /// Draws single-line text. GDI can't write alpha, so the text is rendered
     /// white-on-black into a scratch bitmap and used as a coverage mask.
     pub unsafe fn text(&mut self, s: &str, r: RECT, font: HFONT, c: Color, format: DRAW_TEXT_FORMAT) {

@@ -1,6 +1,7 @@
 //! Alt+Shift+5 capture menu. Unlike the Alt+Shift+4 overlay the desktop stays
 //! live: a layered window draws an editable area selection and a toolbar with
-//! Area, Fullscreen and Window capture, size fields and aspect-ratio presets.
+//! Area, Fullscreen and Window capture, screen recording, size fields and
+//! aspect-ratio presets.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -15,7 +16,9 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN, VK_TAB};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::audio::{self, Device};
 use crate::capture;
+use crate::record::Settings;
 use crate::gfx::{
     blend, contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, union, Canvas, Color,
     Dib, RectF, SELECTION,
@@ -28,22 +31,30 @@ const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
 const BACKGROUND: u32 = 0x0100_0000;
 const WHITE: u32 = 0xFFFF_FFFF;
 
-const PANEL_FILL: Color = rgba(0x121212, 255);
-const PANEL_BORDER: Color = rgba(0x3A3A3A, 255);
+pub(crate) const PANEL_FILL: Color = rgba(0x121212, 255);
+pub(crate) const PANEL_BORDER: Color = rgba(0x3A3A3A, 255);
 const BUTTON_ACTIVE: Color = rgba(0x383838, 255);
-const BUTTON_HOVER: Color = rgba(0x262626, 255);
+pub(crate) const BUTTON_HOVER: Color = rgba(0x262626, 255);
 const FIELD_FILL: Color = rgba(0x222222, 255);
 const FIELD_HOVER: Color = rgba(0x4A4A4A, 255);
 const ACCENT: Color = rgba(0x2D8CFF, 255);
-const TEXT: Color = rgba(0xFFFFFF, 235);
+pub(crate) const TEXT: Color = rgba(0xFFFFFF, 235);
 const TEXT_DIM: Color = rgba(0xFFFFFF, 130);
 const HANDLE_FILL: Color = rgba(0xFFFFFF, 255);
 const HANDLE_BORDER: Color = rgba(0x000000, 70);
 
+const RECORD_RED: Color = rgba(0xFF5A52, 255);
+
 const MIN_SIZE: i32 = 2;
-const TOOLTIPS: [&str; 3] = ["Capture Area", "Capture Fullscreen", "Capture Window"];
+const TOOLTIPS: [&str; 4] = ["Capture Area", "Capture Fullscreen", "Capture Window", "Record Screen"];
 const TOOLTIP_TIMER: usize = 1;
-const TOOLTIP_DELAY_MS: u32 = 400;
+pub(crate) const TOOLTIP_DELAY_MS: u32 = 400;
+const NO_MIC: &str = "Do not record microphone";
+const NO_MICS_FOUND: &str = "No microphones found";
+
+/// Buttons on the recording island; the last one starts recording.
+const REC_SYSTEM_AUDIO: usize = 0;
+const REC_MIC: usize = 1;
 const ASPECTS: [(&str, Option<(i32, i32)>); 7] = [
     ("Freeform", None),
     ("1:1", Some((1, 1))),
@@ -59,12 +70,22 @@ thread_local! {
     /// Last area in screen coordinates, restored the next time the menu opens.
     static LAST_AREA: Cell<Option<RECT>> = const { Cell::new(None) };
     static LAST_ASPECT: Cell<usize> = const { Cell::new(0) };
+    static LAST_SYSTEM_AUDIO: Cell<bool> = const { Cell::new(true) };
+    /// Endpoint ID of the microphone last chosen for recording.
+    static LAST_MIC: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Area,
     Window,
+    Record,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Popup {
+    Aspect,
+    Mic,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,6 +111,9 @@ enum Hit {
     Field(Field),
     Aspect,
     Item(usize),
+    RecButton(usize),
+    /// 0 is "Do not record microphone", then one per microphone.
+    MicItem(usize),
 }
 
 /// Which edges a resize handle moves: -1 left/top, 1 right/bottom, 0 neither.
@@ -117,6 +141,7 @@ struct Edit {
 enum Target {
     Rect(RECT),
     Window(HWND, RECT),
+    Record(Settings),
 }
 
 enum Action {
@@ -152,7 +177,7 @@ impl Drop for Fonts {
     }
 }
 
-unsafe fn font(px: f32, weight: i32) -> HFONT {
+pub(crate) unsafe fn font(px: f32, weight: i32) -> HFONT {
     let mut lf = LOGFONTW {
         lfHeight: -(px.round() as i32),
         lfWeight: weight,
@@ -168,7 +193,7 @@ unsafe fn font(px: f32, weight: i32) -> HFONT {
 /// Toolbar geometry in overlay coordinates.
 struct Layout {
     left: RECT,
-    buttons: [RECT; 3],
+    buttons: [RECT; 4],
     right: RECT,
     fields: [RECT; 2],
     times: RECT,
@@ -176,10 +201,16 @@ struct Layout {
     aspect: RECT,
     dropdown: RECT,
     items: Vec<RECT>,
+    /// Shown to the right of the others in Record mode, without recentring
+    /// them, so the buttons don't jump when switching modes.
+    record: RECT,
+    record_buttons: [RECT; 3],
+    record_divider: RECT,
 }
 
 impl Layout {
-    /// Centres two pill-shaped islands near the bottom of the work area.
+    /// Centres two pill-shaped islands near the bottom of the work area,
+    /// with room for a third in Record mode.
     fn new(work: RECT, scale: f32) -> Self {
         let px = |v: f32| (v * scale).round() as i32;
         let rect = |l: i32, t: i32, w: i32, h: i32| RECT {
@@ -192,7 +223,7 @@ impl Layout {
         let pad = px(6.0);
         let (btn, bgap) = (px(36.0), px(4.0));
         let panel_h = btn + 2 * pad;
-        let left_w = 3 * btn + 2 * bgap + 2 * pad;
+        let left_w = 4 * btn + 3 * bgap + 2 * pad;
 
         let (fw, fh) = (px(60.0), px(32.0));
         let times_w = px(18.0);
@@ -206,7 +237,7 @@ impl Layout {
         let cy = top + panel_h / 2;
 
         let left = rect(x0, top, left_w, panel_h);
-        let buttons = [0, 1, 2].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
+        let buttons = [0, 1, 2, 3].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
 
         let right = rect(left.right + island_gap, top, right_w, panel_h);
         // Inset the first field so its rounded end sits concentric with the island's.
@@ -228,6 +259,17 @@ impl Layout {
             .map(|i| rect(dropdown.left + pad, dropdown.top + pad + i * item_h, item_w, item_h))
             .collect();
 
+        let record_w = 2 * pad + 3 * btn + bgap + px(12.0) + divider_w;
+        let record = rect(right.right + island_gap, top, record_w, panel_h);
+        let mut x = record.left + pad;
+        let system_audio = rect(x, top + pad, btn, btn);
+        x += btn + bgap;
+        let mic = rect(x, top + pad, btn, btn);
+        x += btn + px(6.0);
+        let record_divider = rect(x, cy - px(12.0), divider_w, px(24.0));
+        x += divider_w + px(6.0);
+        let start = rect(x, top + pad, btn, btn);
+
         Self {
             left,
             buttons,
@@ -238,6 +280,9 @@ impl Layout {
             aspect,
             dropdown,
             items,
+            record,
+            record_buttons: [system_audio, mic, start],
+            record_divider,
         }
     }
 }
@@ -261,7 +306,14 @@ struct Menu {
     drag: Option<Drag>,
     hover: Hit,
     edit: Option<Edit>,
-    dropdown: bool,
+    dropdown: Option<Popup>,
+    system_audio: bool,
+    mic: Option<String>,
+    mics: Vec<Device>,
+    /// Microphone menu geometry: the panel, its rows and the separator.
+    mic_popup: RECT,
+    mic_items: Vec<RECT>,
+    mic_separator: RECT,
     windows: Vec<(HWND, RECT)>,
     window: Option<usize>,
     /// The control whose tooltip is showing (shown after hovering a moment).
@@ -300,7 +352,7 @@ impl Menu {
     /// The rectangle currently shown with the selection tint and border.
     fn highlight(&self) -> Option<RECT> {
         match self.mode {
-            Mode::Area => Some(self.area),
+            Mode::Area | Mode::Record => Some(self.area),
             Mode::Window => self
                 .window
                 .map(|i| intersect(self.windows[i].1, self.bounds()))
@@ -333,8 +385,13 @@ impl Menu {
         let pad = self.handle_radius().ceil() as i32 + 2;
         let mut r = self.highlight().map(|h| inflate(h, pad)).unwrap_or_default();
         r = union(r, union(self.layout.left, self.layout.right));
-        if self.dropdown {
-            r = union(r, self.layout.dropdown);
+        if self.mode == Mode::Record {
+            r = union(r, self.layout.record);
+        }
+        match self.dropdown {
+            Some(Popup::Aspect) => r = union(r, self.layout.dropdown),
+            Some(Popup::Mic) => r = union(r, self.mic_popup),
+            None => {}
         }
         if let Some((tip, _)) = self.tooltip_rect() {
             r = union(r, tip);
@@ -342,12 +399,31 @@ impl Menu {
         r
     }
 
+    /// Whether the area can be edited (it's what gets captured).
+    fn editable(&self) -> bool {
+        self.mode != Mode::Window
+    }
+
+    /// Index into `mics` of the chosen microphone, if it's still present.
+    fn mic_index(&self) -> Option<usize> {
+        let id = self.mic.as_ref()?;
+        self.mics.iter().position(|d| &d.id == id)
+    }
+
     fn tooltip_text(&self, hit: Hit) -> Option<String> {
-        if self.dropdown {
+        if self.dropdown.is_some() {
             return None;
         }
         match hit {
             Hit::Button(i) => Some(TOOLTIPS[i].to_string()),
+            Hit::RecButton(REC_SYSTEM_AUDIO) => {
+                Some(format!("System Audio: {}", if self.system_audio { "On" } else { "Off" }))
+            }
+            Hit::RecButton(REC_MIC) => Some(match self.mic_index() {
+                Some(i) => format!("Microphone: {}", self.mics[i].name),
+                None => "Microphone: Off".into(),
+            }),
+            Hit::RecButton(_) => Some("Start Recording".into()),
             Hit::Field(Field::Width) => Some("Width".into()),
             Hit::Field(Field::Height) => Some("Height".into()),
             Hit::Aspect => Some(format!("Aspect Ratio: {}", ASPECTS[self.aspect].0)),
@@ -362,6 +438,7 @@ impl Menu {
         let l = &self.layout;
         let anchor = match hit {
             Hit::Button(i) => l.buttons[i],
+            Hit::RecButton(i) => l.record_buttons[i],
             Hit::Field(Field::Width) => l.fields[0],
             Hit::Field(Field::Height) => l.fields[1],
             Hit::Aspect => l.aspect,
@@ -472,7 +549,7 @@ impl Menu {
             c.fill(r, self.tint);
             c.frame(r, WHITE);
         }
-        if self.mode == Mode::Area {
+        if self.editable() {
             let rad = self.handle_radius();
             for (x, y) in self.handle_points() {
                 let dot = RectF {
@@ -500,7 +577,12 @@ impl Menu {
 
         panel(c, l.left, pill(l.left));
         for (i, &r) in l.buttons.iter().enumerate() {
-            let active = (i == 0 && self.mode == Mode::Area) || (i == 2 && self.mode == Mode::Window);
+            let active = match i {
+                0 => self.mode == Mode::Area,
+                2 => self.mode == Mode::Window,
+                3 => self.mode == Mode::Record,
+                _ => false,
+            };
             if active {
                 c.round_rect(r.into(), pill(r), BUTTON_ACTIVE);
             } else if self.hover == Hit::Button(i) {
@@ -511,7 +593,7 @@ impl Menu {
         }
 
         panel(c, l.right, pill(l.right));
-        let editable = self.mode == Mode::Area;
+        let editable = self.editable();
         let color = if editable { TEXT } else { TEXT_DIM };
         for (f, &r) in [Field::Width, Field::Height].iter().zip(&l.fields) {
             c.round_rect(r.into(), pill(r), FIELD_FILL);
@@ -526,7 +608,7 @@ impl Menu {
         c.blend_rect(l.divider, PANEL_BORDER);
 
         let a = l.aspect;
-        if editable && self.dropdown {
+        if editable && self.dropdown == Some(Popup::Aspect) {
             c.round_rect(a.into(), pill(a), BUTTON_ACTIVE);
         } else if editable && self.hover == Hit::Aspect {
             c.round_rect(a.into(), pill(a), BUTTON_HOVER);
@@ -545,25 +627,77 @@ impl Menu {
             c.round_rect(dot, br, ACCENT);
         }
 
+        if self.mode == Mode::Record {
+            panel(c, l.record, pill(l.record));
+            for (i, &r) in l.record_buttons.iter().enumerate() {
+                let on = match i {
+                    REC_SYSTEM_AUDIO => self.system_audio,
+                    REC_MIC => self.mic_index().is_some(),
+                    _ => false,
+                };
+                if on || (i == REC_MIC && self.dropdown == Some(Popup::Mic)) {
+                    c.round_rect(r.into(), pill(r), BUTTON_ACTIVE);
+                } else if self.hover == Hit::RecButton(i) {
+                    c.round_rect(r.into(), pill(r), BUTTON_HOVER);
+                }
+                let (cx, cy) = centre(r);
+                match i {
+                    REC_SYSTEM_AUDIO => draw_speaker_icon(c, cx, cy, s, on),
+                    REC_MIC => draw_mic_icon(c, cx, cy, s, on),
+                    _ => {
+                        let rad = 7.0 * s;
+                        let dot = RectF {
+                            l: cx - rad,
+                            t: cy - rad,
+                            r: cx + rad,
+                            b: cy + rad,
+                        };
+                        c.round_rect(dot, rad, RECORD_RED);
+                    }
+                }
+            }
+            c.blend_rect(l.record_divider, PANEL_BORDER);
+        }
+
         if let Some((r, text)) = self.tooltip_rect() {
             panel(c, r, pill(r));
             c.text(&text, r, self.fonts.label, TEXT, DT_CENTER | DT_VCENTER);
         }
 
-        if self.dropdown {
+        if self.dropdown == Some(Popup::Mic) {
+            panel(c, self.mic_popup, 14.0 * s);
+            c.blend_rect(self.mic_separator, PANEL_BORDER);
+            let selected = self.mic_index().map_or(0, |i| i + 1);
+            for (i, &r) in self.mic_items.iter().enumerate() {
+                let empty = self.mics.is_empty() && i == 1;
+                if self.hover == Hit::MicItem(i) && !empty {
+                    c.round_rect(r.into(), 8.0 * s, BUTTON_HOVER);
+                }
+                if i == selected {
+                    draw_check(c, r, s);
+                }
+                let label = RECT {
+                    left: r.left + self.px(28.0),
+                    right: r.right - self.px(8.0),
+                    ..r
+                };
+                let (text, color) = match i {
+                    0 => (NO_MIC, TEXT),
+                    _ if empty => (NO_MICS_FOUND, TEXT_DIM),
+                    _ => (self.mics[i - 1].name.as_str(), TEXT),
+                };
+                c.text(text, label, self.fonts.item, color, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+        }
+
+        if self.dropdown == Some(Popup::Aspect) {
             panel(c, l.dropdown, 14.0 * s);
             for (i, &r) in l.items.iter().enumerate() {
                 if self.hover == Hit::Item(i) {
                     c.round_rect(r.into(), 8.0 * s, BUTTON_HOVER);
                 }
-                let cy = (r.top + r.bottom) as f32 / 2.0;
                 if i == self.aspect {
-                    let x = r.left as f32 + 13.0 * s;
-                    c.polyline(
-                        &[(x - 4.0 * s, cy), (x - 1.2 * s, cy + 3.0 * s), (x + 4.5 * s, cy - 3.5 * s)],
-                        1.6 * s,
-                        TEXT,
-                    );
+                    draw_check(c, r, s);
                 }
                 let label = RECT {
                     left: r.left + self.px(28.0),
@@ -589,18 +723,37 @@ impl Menu {
 
     fn hit(&self, p: POINT) -> Hit {
         let l = &self.layout;
-        if self.dropdown {
-            if let Some(i) = l.items.iter().position(|r| contains(*r, p)) {
-                return Hit::Item(i);
+        match self.dropdown {
+            Some(Popup::Aspect) => {
+                if let Some(i) = l.items.iter().position(|r| contains(*r, p)) {
+                    return Hit::Item(i);
+                }
+                if contains(l.dropdown, p) {
+                    return Hit::Toolbar;
+                }
             }
-            if contains(l.dropdown, p) {
-                return Hit::Toolbar;
+            Some(Popup::Mic) => {
+                let empty = self.mics.is_empty();
+                match self.mic_items.iter().position(|r| contains(*r, p)) {
+                    Some(i) if !(empty && i == 1) => return Hit::MicItem(i),
+                    _ if contains(self.mic_popup, p) => return Hit::Toolbar,
+                    _ => {}
+                }
             }
+            None => {}
         }
         if let Some(i) = l.buttons.iter().position(|r| contains(*r, p)) {
             return Hit::Button(i);
         }
-        if self.mode == Mode::Area {
+        if self.mode == Mode::Record {
+            if let Some(i) = l.record_buttons.iter().position(|r| contains(*r, p)) {
+                return Hit::RecButton(i);
+            }
+            if contains(l.record, p) {
+                return Hit::Toolbar;
+            }
+        }
+        if self.editable() {
             if contains(l.fields[0], p) {
                 return Hit::Field(Field::Width);
             }
@@ -653,6 +806,65 @@ impl Menu {
         Action::Capture(Target::Rect(self.area))
     }
 
+    fn record_target(&self) -> Action {
+        Action::Capture(Target::Record(Settings {
+            rect: self.area,
+            system_audio: self.system_audio,
+            mic: self.mic_index().map(|i| self.mics[i].id.clone()),
+        }))
+    }
+
+    fn set_mic(&mut self, item: usize) {
+        self.mic = item.checked_sub(1).and_then(|i| self.mics.get(i)).map(|d| d.id.clone());
+        LAST_MIC.set(self.mic.clone());
+        self.dirty = true;
+    }
+
+    /// Lays out the microphone menu above its button, sized to fit the
+    /// longest device name (within limits).
+    fn layout_mic_popup(&mut self) {
+        let (pad, item_h, sep_h) = (self.px(6.0), self.px(28.0), self.px(9.0));
+        let mut labels = vec![NO_MIC];
+        if self.mics.is_empty() {
+            labels.push(NO_MICS_FOUND);
+        }
+        labels.extend(self.mics.iter().map(|d| d.name.as_str()));
+        let text_w = labels.iter().map(|s| text_width(self.fonts.item, s)).max().unwrap_or(0);
+        let item_w = (text_w + self.px(36.0)).clamp(self.px(200.0), self.px(360.0));
+        let w = item_w + 2 * pad;
+        let h = 2 * pad + labels.len() as i32 * item_h + sep_h;
+
+        let anchor = self.layout.record_buttons[REC_MIC];
+        let left = (anchor.left - pad).clamp(self.monitor.left, (self.monitor.right - w).max(self.monitor.left));
+        let bottom = self.layout.left.top - self.px(10.0);
+        self.mic_popup = RECT {
+            left,
+            top: bottom - h,
+            right: left + w,
+            bottom,
+        };
+        let mut y = self.mic_popup.top + pad;
+        self.mic_items.clear();
+        for i in 0..labels.len() {
+            self.mic_items.push(RECT {
+                left: left + pad,
+                top: y,
+                right: left + pad + item_w,
+                bottom: y + item_h,
+            });
+            y += item_h;
+            if i == 0 {
+                self.mic_separator = RECT {
+                    left: left + pad + self.px(8.0),
+                    top: y + sep_h / 2,
+                    right: left + pad + item_w - self.px(8.0),
+                    bottom: y + sep_h / 2 + 1,
+                };
+                y += sep_h;
+            }
+        }
+    }
+
     fn window_target(&self) -> Action {
         match self.window {
             Some(i) => Action::Capture(Target::Window(self.windows[i].0, self.windows[i].1)),
@@ -663,8 +875,12 @@ impl Menu {
     unsafe fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         self.edit = None;
-        self.dropdown = false;
+        self.dropdown = None;
         self.window = None;
+        if mode == Mode::Record {
+            self.mics = audio::microphones();
+            self.layout_mic_popup();
+        }
         if mode == Mode::Window {
             self.windows = list_windows(self.origin);
             let mut p = POINT::default();
@@ -742,11 +958,12 @@ impl Menu {
     unsafe fn mouse_down(&mut self, p: POINT) -> Action {
         self.hide_tooltip();
         let hit = self.hit(p);
-        if self.dropdown {
-            self.dropdown = false;
+        if self.dropdown.take().is_some() {
             self.dirty = true;
-            if let Hit::Item(i) = hit {
-                self.set_aspect(i);
+            match hit {
+                Hit::Item(i) => self.set_aspect(i),
+                Hit::MicItem(i) => self.set_mic(i),
+                _ => {}
             }
             return Action::None;
         }
@@ -760,21 +977,38 @@ impl Menu {
                 Action::None
             }
             Hit::Button(1) => Action::Capture(Target::Rect(self.monitor)),
-            Hit::Button(_) => {
+            Hit::Button(2) => {
                 let mode = if self.mode == Mode::Window { Mode::Area } else { Mode::Window };
                 self.set_mode(mode);
                 Action::None
             }
+            Hit::Button(_) if self.mode == Mode::Record => self.record_target(),
+            Hit::Button(_) => {
+                self.set_mode(Mode::Record);
+                Action::None
+            }
+            Hit::RecButton(REC_SYSTEM_AUDIO) => {
+                self.system_audio = !self.system_audio;
+                LAST_SYSTEM_AUDIO.set(self.system_audio);
+                self.dirty = true;
+                Action::None
+            }
+            Hit::RecButton(REC_MIC) => {
+                self.dropdown = Some(Popup::Mic);
+                self.dirty = true;
+                Action::None
+            }
+            Hit::RecButton(_) => self.record_target(),
             Hit::Field(f) => {
                 self.begin_edit(f);
                 Action::None
             }
             Hit::Aspect => {
-                self.dropdown = true;
+                self.dropdown = Some(Popup::Aspect);
                 self.dirty = true;
                 Action::None
             }
-            Hit::Toolbar | Hit::Item(_) => Action::None,
+            Hit::Toolbar | Hit::Item(_) | Hit::MicItem(_) => Action::None,
             Hit::None if self.mode == Mode::Window => self.window_target(),
             Hit::None => {
                 let orig = self.area;
@@ -830,11 +1064,11 @@ impl Menu {
     unsafe fn key_down(&mut self, key: VIRTUAL_KEY) -> Action {
         match key {
             VK_ESCAPE => {
-                if self.dropdown {
-                    self.dropdown = false;
+                if self.dropdown.is_some() {
+                    self.dropdown = None;
                 } else if self.edit.is_some() {
                     self.edit = None;
-                } else if self.mode == Mode::Window {
+                } else if self.mode != Mode::Area {
                     self.set_mode(Mode::Area);
                 } else {
                     return Action::Close;
@@ -846,8 +1080,11 @@ impl Menu {
                 self.commit_edit();
                 Action::None
             }
-            VK_RETURN if self.mode == Mode::Area => self.area_target(),
-            VK_RETURN => self.window_target(),
+            VK_RETURN => match self.mode {
+                Mode::Area => self.area_target(),
+                Mode::Record => self.record_target(),
+                Mode::Window => self.window_target(),
+            },
             VK_TAB => {
                 if let Some(field) = self.edit.as_ref().map(|e| e.field.other()) {
                     self.begin_edit(field);
@@ -1043,7 +1280,7 @@ fn draw_button_icon(c: &mut Canvas, i: usize, cx: f32, cy: f32, s: f32) {
             c.polyline(&[(cx, cy + 5.0 * s), (cx, cy + 8.0 * s)], t, TEXT);
             c.polyline(&[(cx - 4.5 * s, cy + 8.5 * s), (cx + 4.5 * s, cy + 8.5 * s)], t, TEXT);
         }
-        _ => {
+        2 => {
             let frame = RectF {
                 l: cx - 9.5 * s,
                 t: cy - 7.5 * s,
@@ -1053,6 +1290,82 @@ fn draw_button_icon(c: &mut Canvas, i: usize, cx: f32, cy: f32, s: f32) {
             c.round_rect_stroke(frame, 2.5 * s, t, TEXT);
             c.polyline(&[(cx - 9.0 * s, cy - 3.0 * s), (cx + 9.0 * s, cy - 3.0 * s)], t, TEXT);
         }
+        _ => {
+            // A video camera: body plus a lens flaring out to the right.
+            let body = RectF {
+                l: cx - 10.0 * s,
+                t: cy - 6.0 * s,
+                r: cx + 3.0 * s,
+                b: cy + 6.0 * s,
+            };
+            c.round_rect_stroke(body, 2.5 * s, t, TEXT);
+            c.polyline(
+                &[
+                    (cx + 3.0 * s, cy - 1.5 * s),
+                    (cx + 9.5 * s, cy - 5.0 * s),
+                    (cx + 9.5 * s, cy + 5.0 * s),
+                    (cx + 3.0 * s, cy + 1.5 * s),
+                ],
+                t,
+                TEXT,
+            );
+        }
+    }
+}
+
+/// A check mark at the left of a menu row.
+fn draw_check(c: &mut Canvas, row: RECT, s: f32) {
+    let x = row.left as f32 + 13.0 * s;
+    let cy = (row.top + row.bottom) as f32 / 2.0;
+    c.polyline(
+        &[(x - 4.0 * s, cy), (x - 1.2 * s, cy + 3.0 * s), (x + 4.5 * s, cy - 3.5 * s)],
+        1.6 * s,
+        TEXT,
+    );
+}
+
+/// A speaker with sound waves when on, or a cross when muted.
+fn draw_speaker_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, on: bool) {
+    let t = 1.6 * s;
+    let x = cx - 3.0 * s;
+    c.polyline(
+        &[
+            (x - 6.0 * s, cy - 3.0 * s),
+            (x - 2.5 * s, cy - 3.0 * s),
+            (x + 2.0 * s, cy - 7.0 * s),
+            (x + 2.0 * s, cy + 7.0 * s),
+            (x - 2.5 * s, cy + 3.0 * s),
+            (x - 6.0 * s, cy + 3.0 * s),
+            (x - 6.0 * s, cy - 3.0 * s),
+        ],
+        t,
+        TEXT,
+    );
+    let wx = x + 2.0 * s;
+    if on {
+        c.arc(wx, cy, 4.5 * s, -45.0, 45.0, t, TEXT);
+        c.arc(wx, cy, 8.5 * s, -45.0, 45.0, t, TEXT);
+    } else {
+        let (mx, d) = (wx + 6.0 * s, 2.8 * s);
+        c.polyline(&[(mx - d, cy - d), (mx + d, cy + d)], t, TEXT);
+        c.polyline(&[(mx - d, cy + d), (mx + d, cy - d)], t, TEXT);
+    }
+}
+
+/// A microphone, struck through when off.
+fn draw_mic_icon(c: &mut Canvas, cx: f32, cy: f32, s: f32, on: bool) {
+    let t = 1.6 * s;
+    let capsule = RectF {
+        l: cx - 3.5 * s,
+        t: cy - 9.0 * s,
+        r: cx + 3.5 * s,
+        b: cy + 2.5 * s,
+    };
+    c.round_rect_stroke(capsule, 3.5 * s, t, TEXT);
+    c.arc(cx, cy - 1.0 * s, 6.5 * s, 0.0, 180.0, t, TEXT);
+    c.polyline(&[(cx, cy + 5.5 * s), (cx, cy + 8.5 * s)], t, TEXT);
+    if !on {
+        c.polyline(&[(cx - 7.5 * s, cy - 8.5 * s), (cx + 7.5 * s, cy + 8.5 * s)], t, TEXT);
     }
 }
 
@@ -1143,7 +1456,7 @@ pub unsafe fn register(instance: HINSTANCE) -> Result<()> {
 
 /// Opens the capture menu, reporting any failure to the user.
 pub fn open() {
-    if is_open() || crate::overlay::is_open() {
+    if is_open() || crate::overlay::is_open() || crate::recbar::is_active() {
         return;
     }
     let result = unsafe { GetModuleHandleW(None).and_then(|m| start(m.into())) };
@@ -1233,7 +1546,13 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         drag: None,
         hover: Hit::None,
         edit: None,
-        dropdown: false,
+        dropdown: None,
+        system_audio: LAST_SYSTEM_AUDIO.get(),
+        mic: LAST_MIC.with_borrow(|m| m.clone()),
+        mics: Vec::new(),
+        mic_popup: RECT::default(),
+        mic_items: Vec::new(),
+        mic_separator: RECT::default(),
         windows: Vec::new(),
         window: None,
         tooltip: None,
@@ -1261,13 +1580,21 @@ fn finish(target: Option<Target>) {
     let Some(target) = target else {
         return;
     };
-    let rect = match target {
-        Target::Rect(r) | Target::Window(_, r) => intersect(offset(r, origin.x, origin.y), virtual_screen),
-    };
+    let to_screen = |r: RECT| intersect(offset(r, origin.x, origin.y), virtual_screen);
     unsafe {
         // Wait until the compositor has drawn a frame without the overlay.
         let _ = DwmFlush();
         let _ = DwmFlush();
+    }
+    let rect = match target {
+        Target::Rect(r) | Target::Window(_, r) => to_screen(r),
+        Target::Record(settings) => {
+            let rect = to_screen(settings.rect);
+            crate::recbar::start(Settings { rect, ..settings });
+            return;
+        }
+    };
+    unsafe {
         if let Target::Window(hwnd, _) = target {
             // Raise the window so overlapping windows don't end up in the shot.
             if SetForegroundWindow(hwnd).as_bool() {

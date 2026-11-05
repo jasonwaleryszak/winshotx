@@ -87,7 +87,7 @@ pub fn is_open() -> bool {
 
 /// Opens the selection overlay, reporting any failure to the user.
 pub fn open() {
-    if is_open() || crate::menu::is_open() {
+    if is_open() || crate::menu::is_open() || crate::recbar::is_active() {
         return;
     }
     let result = unsafe { GetModuleHandleW(None).and_then(|m| start(m.into())) };

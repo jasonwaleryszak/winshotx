@@ -1,11 +1,14 @@
 // Release builds have no console window; debug builds keep one so Ctrl+C works.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod autostart;
 mod capture;
 mod gfx;
 mod menu;
 mod overlay;
+mod recbar;
+mod record;
 mod tray;
 
 use windows::core::{w, Result, HSTRING};
@@ -28,6 +31,7 @@ fn main() -> Result<()> {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
         overlay::register(instance)?;
         menu::register(instance)?;
+        recbar::register(instance)?;
 
         for (id, key, name) in [(HOTKEY_REGION, '4', "Alt+Shift+4"), (HOTKEY_MENU, '5', "Alt+Shift+5")] {
             if let Err(e) = RegisterHotKey(None, id, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, key as u32) {
@@ -46,6 +50,8 @@ fn main() -> Result<()> {
             if msg.message == WM_HOTKEY {
                 match msg.wParam.0 as i32 {
                     HOTKEY_REGION => overlay::open(),
+                    // While recording, the menu hotkey stops the recording.
+                    HOTKEY_MENU if recbar::is_active() => recbar::stop(),
                     HOTKEY_MENU => menu::open(),
                     _ => {}
                 }
@@ -56,6 +62,7 @@ fn main() -> Result<()> {
         }
         overlay::close();
         menu::close();
+        recbar::close();
         drop(tray);
     }
     Ok(())

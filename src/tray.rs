@@ -151,8 +151,11 @@ unsafe fn show_menu(hwnd: HWND) {
     };
     let autostart_on = autostart::is_enabled();
     let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
-    let _ = AppendMenuW(menu, MF_STRING, CMD_CAPTURE, w!("Capture Region\tAlt+Shift+4"));
-    let _ = AppendMenuW(menu, MF_STRING, CMD_MENU, w!("Capture...\tAlt+Shift+5"));
+    let recording = crate::recbar::is_active();
+    let region_flags = if recording { MF_STRING | MF_GRAYED } else { MF_STRING };
+    let _ = AppendMenuW(menu, region_flags, CMD_CAPTURE, w!("Capture Region\tAlt+Shift+4"));
+    let menu_label = if recording { w!("Stop Recording\tAlt+Shift+5") } else { w!("Capture...\tAlt+Shift+5") };
+    let _ = AppendMenuW(menu, MF_STRING, CMD_MENU, menu_label);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING | check, CMD_AUTOSTART, w!("Start with Windows"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -176,6 +179,7 @@ unsafe fn show_menu(hwnd: HWND) {
 
     match cmd.0 as usize {
         CMD_CAPTURE => crate::overlay::open(),
+        CMD_MENU if crate::recbar::is_active() => crate::recbar::stop(),
         CMD_MENU => crate::menu::open(),
         CMD_AUTOSTART => {
             if let Err(e) = autostart::set_enabled(!autostart_on) {
