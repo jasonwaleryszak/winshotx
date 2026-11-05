@@ -1,4 +1,4 @@
-# WinShotX
+# WinShot X
 
 A small screenshot and screen recording tool for Windows that runs in the system tray. Written in Rust using the Win32 API directly.
 
