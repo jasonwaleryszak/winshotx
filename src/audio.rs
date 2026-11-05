@@ -120,7 +120,7 @@ impl Capture {
                     .GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
                 let n = (frames * CHANNELS) as usize;
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
-                    self.buffer.extend(std::iter::repeat(0.0).take(n));
+                    self.buffer.extend(std::iter::repeat_n(0.0, n));
                 } else {
                     self.buffer
                         .extend(std::slice::from_raw_parts(data as *const f32, n));

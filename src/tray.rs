@@ -238,7 +238,7 @@ unsafe fn create_icon() -> Result<HICON> {
     );
 
     // The alpha channel defines transparency; the mask just has to exist.
-    let mask_bits = vec![0u8; (size as usize + 15) / 16 * 2 * size as usize];
+    let mask_bits = vec![0u8; (size as usize).div_ceil(16) * 2 * size as usize];
     let mask = CreateBitmap(size, size, 1, 1, Some(mask_bits.as_ptr().cast()));
     let info = ICONINFO {
         fIcon: TRUE,
