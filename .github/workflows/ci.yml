@@ -29,3 +29,25 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      # build.rs embeds these; make sure Windows can actually read them.
+      - name: Check exe resources
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path target/release/winshotx.exe).Path
+
+          $info = (Get-Item $exe).VersionInfo
+          $info | Format-List FileVersion, ProductVersion, ProductName, FileDescription, OriginalFilename
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($info.ProductVersion -ne $version) { throw "ProductVersion '$($info.ProductVersion)' != Cargo.toml '$version'" }
+
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -Namespace Win32 -Name Shell -MemberDefinition '
+            [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+            public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);'
+          if ([Win32.Shell]::ExtractIconEx($exe, -1, $null, $null, 0) -lt 1) { throw "exe has no icon" }
+          $large = [IntPtr[]]::new(1)
+          [void][Win32.Shell]::ExtractIconEx($exe, 0, $large, $null, 1)
+          $pixel = [System.Drawing.Icon]::FromHandle($large[0]).ToBitmap().GetPixel(16, 16)
+          "Icon centre pixel: $pixel"
+          if ($pixel.R -ne 0x2D -or $pixel.G -ne 0x7D -or $pixel.B -ne 0xF6) { throw "icon is not the logo" }
