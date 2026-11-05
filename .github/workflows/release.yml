@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Releases are keyed off the Cargo.toml version; bump it to cut a new one.
+      - name: Read version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "Release v$version already exists; skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.version.outputs.exists != 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.exists != 'true'
+
+      - name: Build
+        if: steps.version.outputs.exists != 'true'
+        run: cargo build --release
+
+      - name: Publish release
+        if: steps.version.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" target/release/winshotx.exe \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
+            --generate-notes
