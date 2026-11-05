@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Releases are keyed off the Cargo.toml version; bump it to cut a new one.
       - name: Read version
