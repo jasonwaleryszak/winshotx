@@ -13,7 +13,7 @@ use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, POINT, RECT};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::UI::Shell::FOLDERID_Videos;
+
 use windows::Win32::UI::WindowsAndMessaging::{
     DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, HICON, ICONINFO,
 };
@@ -59,7 +59,7 @@ pub struct Recorder {
 impl Recorder {
     /// Starts recording, returning once capture and encoding are set up.
     pub fn start(settings: &Settings) -> Result<Self> {
-        let path = capture::output_path(&FOLDERID_Videos, "mp4")?;
+        let path = capture::output_path("WinShotX recording", "mp4")?;
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let settings = settings.clone();

@@ -1,7 +1,7 @@
 //! Floating controls shown while recording: stop (with the elapsed time),
-//! pause/resume and delete, plus an outline around the recorded
-//! area. The window is excluded from screen capture, so neither shows up in
-//! the video.
+//! pause/resume and delete. The window is excluded from screen capture, so
+//! it doesn't show up in the video. A second, click-through window dims
+//! everything outside the recorded area.
 //!
 //! Display affinity isn't supported for per-pixel-alpha layered windows, so
 //! unlike the capture menu this one is colour-keyed: pixels of `KEY` are
@@ -17,10 +17,15 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::Sleep;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::gfx::{contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, union};
+use crate::gfx::{
+    contains, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin, union,
+    Inside,
+};
 use crate::gfx::{Canvas, Color, Dib, RectF};
 use crate::menu::{font, BUTTON_HOVER, PANEL_BORDER, PANEL_FILL, TEXT, TOOLTIP_DELAY_MS};
 use crate::record::{Recorder, Settings};
@@ -31,10 +36,9 @@ const RED: Color = rgba(0xFF5A52, 255);
 /// fringe. Pixel (0xAARRGGBB) and COLORREF (0x00BBGGRR) forms are identical.
 const KEY: u32 = 0x0001_0001;
 const KEY_PX: u32 = 0xFF00_0000 | KEY;
-/// The outline: a light inner line and a dark outer one, so it shows on any
-/// background.
-const OUTLINE_INNER: u32 = 0xFFE6_E6E6;
-const OUTLINE_OUTER: u32 = 0xFF30_3030;
+const DIM_CLASS_NAME: PCWSTR = w!("WinShotXRecordDim");
+/// Opacity of the black dimming window, matching the capture menu's dim.
+const DIM_ALPHA: u8 = 0x7A;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TICK_TIMER: usize = 1;
@@ -61,6 +65,7 @@ enum Action {
 
 struct Bar {
     hwnd: HWND,
+    dim: HWND,
     width: i32,
     height: i32,
     canvas: Option<Dib>,
@@ -73,10 +78,14 @@ struct Bar {
     buttons: [RECT; 3],
     dividers: [RECT; 2],
     /// The recorded area, in window coordinates.
-    outline: RECT,
+    area: RECT,
     hover: Option<usize>,
     tooltip: Option<usize>,
     tracking: bool,
+    /// The button pressed, which acts if the mouse is released over it.
+    /// Acting on release keeps the button-up from reaching whatever is
+    /// under the bar once it closes.
+    pressed: Option<usize>,
 
     recorder: Option<Recorder>,
     started: Instant,
@@ -91,6 +100,7 @@ impl Drop for Bar {
     fn drop(&mut self) {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.dim);
             let _ = DeleteObject(self.time_font);
             let _ = DeleteObject(self.label_font);
         }
@@ -137,7 +147,12 @@ impl Bar {
         let w = text_width(self.label_font, text) + 2 * self.px(10.0);
         let h = self.px(26.0);
         let left = ((anchor.left + anchor.right - w) / 2).clamp(0, self.width - w);
-        let bottom = self.island.top - self.px(8.0);
+        let gap = self.px(8.0);
+        let bottom = if self.island.top - gap - h >= self.work.top {
+            self.island.top - gap
+        } else {
+            self.island.bottom + gap + h
+        };
         let r = RECT {
             left,
             top: bottom - h,
@@ -148,7 +163,7 @@ impl Bar {
     }
 
     fn decor_bounds(&self) -> RECT {
-        let mut r = union(inflate(self.outline, 2), self.island);
+        let mut r = self.island;
         if let Some((tip, _)) = self.tooltip_rect() {
             r = union(r, tip);
         }
@@ -198,7 +213,8 @@ impl Bar {
             return;
         }
         if time.len() != self.time.len() {
-            (self.island, self.buttons, self.dividers) = layout(self.work, self.scale, self.time_font, &time);
+            (self.island, self.buttons, self.dividers) =
+                layout(self.area, self.work, self.scale, self.time_font, &time);
         }
         self.time = time;
         self.dirty = true;
@@ -221,20 +237,36 @@ impl Bar {
         self.dirty = true;
     }
 
-    fn mouse_down(&mut self, p: POINT) -> Action {
+    fn mouse_down(&mut self, p: POINT) {
         self.hide_tooltip();
-        match self.buttons.iter().position(|r| contains(*r, p)) {
-            Some(STOP) => Action::Stop,
-            Some(PAUSE) => {
-                self.toggle_pause();
-                Action::None
+        self.pressed = self.buttons.iter().position(|r| contains(*r, p));
+        if self.pressed.is_some() {
+            unsafe {
+                SetCapture(self.hwnd);
             }
-
-            Some(DELETE) => Action::Discard,
-            _ => Action::None,
         }
     }
 
+    fn mouse_up(&mut self, p: POINT) -> Action {
+        let Some(pressed) = self.pressed.take() else {
+            return Action::None;
+        };
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if !contains(self.buttons[pressed], p) {
+            return Action::None;
+        }
+        match pressed {
+            STOP => Action::Stop,
+            PAUSE => {
+                self.toggle_pause();
+                Action::None
+            }
+            DELETE => Action::Discard,
+            _ => Action::None,
+        }
+    }
 
     unsafe fn refresh(&mut self) {
         if !self.dirty {
@@ -271,8 +303,6 @@ impl Bar {
 
     unsafe fn draw(&self, c: &mut Canvas) {
         c.fill(c.clip(), KEY_PX);
-        c.frame(inflate(self.outline, 2), OUTLINE_OUTER);
-        c.frame(inflate(self.outline, 1), OUTLINE_INNER);
 
         let s = self.scale;
         let pill = |r: RECT| (r.bottom - r.top) as f32 / 2.0;
@@ -393,7 +423,51 @@ pub unsafe fn register(instance: HINSTANCE) -> Result<()> {
     if RegisterClassW(&wc) == 0 {
         return Err(Error::from_win32());
     }
+    let dim = WNDCLASSW {
+        hInstance: instance,
+        lpszClassName: DIM_CLASS_NAME,
+        lpfnWndProc: Some(dim_wndproc),
+        hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
+        ..Default::default()
+    };
+    if RegisterClassW(&dim) == 0 {
+        return Err(Error::from_win32());
+    }
     Ok(())
+}
+
+extern "system" fn dim_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// A translucent black, click-through window over the virtual screen with
+/// a hole for `area` (screen coordinates).
+unsafe fn create_dim(instance: HINSTANCE, area: RECT) -> Result<HWND> {
+    let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+    let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    let hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        DIM_CLASS_NAME,
+        w!(""),
+        WS_POPUP,
+        x,
+        y,
+        w,
+        h,
+        None,
+        None,
+        instance,
+        None,
+    )?;
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), DIM_ALPHA, LWA_ALPHA);
+    let hole = offset(area, -x, -y);
+    let rgn = CreateRectRgn(0, 0, w, h);
+    let cut = CreateRectRgn(hole.left, hole.top, hole.right, hole.bottom);
+    CombineRgn(rgn, rgn, cut, RGN_DIFF);
+    let _ = DeleteObject(cut);
+    // The window owns the region from here on.
+    SetWindowRgn(hwnd, rgn, false);
+    Ok(hwnd)
 }
 
 /// Starts recording and shows the controls, reporting any failure.
@@ -453,10 +527,12 @@ unsafe fn open(settings: Settings) -> Result<()> {
     let time_font = font(15.0 * scale, 600);
     let label_font = font(12.0 * scale, 400);
     let work = to_local(info.rcWork);
-    let (island, buttons, dividers) = layout(work, scale, time_font, "0:00");
+    let area = to_local(settings.rect);
+    let (island, buttons, dividers) = layout(area, work, scale, time_font, "0:00");
 
     let canvas = Dib::new(HDC::default(), width, height)?;
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
+    let dim = create_dim(instance, settings.rect)?;
     let hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         CLASS_NAME,
@@ -472,13 +548,14 @@ unsafe fn open(settings: Settings) -> Result<()> {
         None,
     )?;
     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(KEY), 0, LWA_COLORKEY);
-    // Keep the controls and outline out of the video.
+    // Keep the controls out of the video.
     let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
     let recorder = match Recorder::start(&settings) {
         Ok(r) => r,
         Err(e) => {
             let _ = DestroyWindow(hwnd);
+            let _ = DestroyWindow(dim);
             let _ = DeleteObject(time_font);
             let _ = DeleteObject(label_font);
             return Err(e);
@@ -487,6 +564,7 @@ unsafe fn open(settings: Settings) -> Result<()> {
 
     let mut bar = Bar {
         hwnd,
+        dim,
         width,
         height,
         canvas: Some(canvas),
@@ -497,10 +575,11 @@ unsafe fn open(settings: Settings) -> Result<()> {
         island,
         buttons,
         dividers,
-        outline: to_local(settings.rect),
+        area,
         hover: None,
         tooltip: None,
         tracking: false,
+        pressed: None,
 
         recorder: Some(recorder),
         started: Instant::now(),
@@ -518,14 +597,17 @@ unsafe fn open(settings: Settings) -> Result<()> {
     bar.time = bar.time_text();
     bar.refresh();
     BAR.with_borrow_mut(|b| *b = Some(bar));
+    // Shown first so the controls end up above it.
+    let _ = ShowWindow(dim, SW_SHOWNOACTIVATE);
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     SetTimer(hwnd, TICK_TIMER, TICK_MS, None);
     Ok(())
 }
 
-/// A pill-shaped island centred near the bottom of the work area: the stop
-/// button with the timer, then pause and delete, with dividers.
-fn layout(work: RECT, scale: f32, time_font: HFONT, time: &str) -> (RECT, [RECT; 3], [RECT; 2]) {
+/// A pill-shaped island attached to the recorded area (see
+/// `toolbar_origin`): the stop button with the timer, then pause and delete,
+/// with dividers.
+fn layout(area: RECT, work: RECT, scale: f32, time_font: HFONT, time: &str) -> (RECT, [RECT; 3], [RECT; 2]) {
     let px = |v: f32| (v * scale).round() as i32;
     let (pad, btn, gap) = (px(6.0), px(36.0), px(4.0));
     let divider_w = px(1.0).max(1);
@@ -535,8 +617,7 @@ fn layout(work: RECT, scale: f32, time_font: HFONT, time: &str) -> (RECT, [RECT;
     let stop_w = px(34.0) + text_width(time_font, &template) + px(12.0);
     let width = 2 * pad + stop_w + 2 * (2 * gap + divider_w + btn);
     let height = btn + 2 * pad;
-    let left = (work.left + work.right - width) / 2;
-    let top = work.bottom - px(28.0) - height;
+    let POINT { x: left, y: top } = toolbar_origin(area, work, width, height, width, Inside::Bottom, scale);
     let island = RECT {
         left,
         top,
@@ -623,7 +704,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_LBUTTONDOWN => {
                 let p = point_from_lparam(lparam);
-                let action = with_bar(|b| b.mouse_down(p));
+                with_bar(|b| b.mouse_down(p));
+                return LRESULT(0);
+            }
+            WM_LBUTTONUP => {
+                let p = point_from_lparam(lparam);
+                let action = with_bar(|b| b.mouse_up(p));
                 act(action);
                 return LRESULT(0);
             }

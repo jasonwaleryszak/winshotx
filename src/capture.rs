@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::core::{w, Error, Result, GUID, PCWSTR, PWSTR, VARIANT};
+use windows::core::{w, Error, Result, PCWSTR, PWSTR, VARIANT};
 use windows::Win32::Foundation::{GlobalFree, E_FAIL, E_INVALIDARG, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
@@ -16,7 +16,7 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::Sleep;
-use windows::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, DROPFILES, KF_FLAG_DEFAULT};
+use windows::Win32::UI::Shell::{FOLDERID_Desktop, SHGetKnownFolderPath, DROPFILES, KF_FLAG_DEFAULT};
 
 use crate::gfx::Dib;
 
@@ -77,7 +77,7 @@ pub fn deliver(image: &Image) {
     if let Err(e) = copy_to_clipboard(crate::tray::hwnd(), image) {
         crate::show_error(&format!("Failed to copy screenshot to clipboard:\n\n{e}"));
     }
-    if let Err(e) = output_path(&FOLDERID_Pictures, "jpg").and_then(|path| save_jpeg(&path, image)) {
+    if let Err(e) = output_path("WinShotX", "jpg").and_then(|path| save_jpeg(&path, image)) {
         crate::show_error(&format!("Failed to save screenshot:\n\n{e}"));
     }
 }
@@ -89,20 +89,19 @@ pub fn deliver_file(path: &Path) {
     }
 }
 
-/// A new, timestamped file name in `<known folder>\WinShotX`.
-pub fn output_path(folder: &GUID, ext: &str) -> Result<PathBuf> {
+/// A new file name on the Desktop: `label`, then a timestamp.
+pub fn output_path(label: &str, ext: &str) -> Result<PathBuf> {
     let dir = unsafe {
-        let p = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None)?;
+        let p = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None)?;
         let s = p.to_string();
         CoTaskMemFree(Some(p.0 as *const c_void));
-        PathBuf::from(s.map_err(|e| Error::new(E_FAIL, e.to_string()))?).join("WinShotX")
+        PathBuf::from(s.map_err(|e| Error::new(E_FAIL, e.to_string()))?)
     };
-    std::fs::create_dir_all(&dir).map_err(|e| Error::new(E_FAIL, e.to_string()))?;
 
     // Windows forbids ':' in file names, so the time uses '.' separators.
     let t = unsafe { GetLocalTime() };
     let stem = format!(
-        "WinShotX {:04}-{:02}-{:02} {:02}.{:02}.{:02}",
+        "{label} {:04}-{:02}-{:02} {:02}.{:02}.{:02}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     );
     let mut path = dir.join(format!("{stem}.{ext}"));

@@ -20,8 +20,8 @@ use crate::audio::{self, Device};
 use crate::capture;
 use crate::record::Settings;
 use crate::gfx::{
-    blend, contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, union, Canvas, Color,
-    Dib, RectF, SELECTION,
+    contains, inflate, intersect, is_empty, offset, point_from_lparam, rgba, text_width, toolbar_origin, union, Canvas,
+    Color, Dib, Inside, RectF,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
@@ -29,7 +29,8 @@ const CLASS_NAME: PCWSTR = w!("WinShotXMenu");
 /// Fully transparent pixels of a layered window let clicks through to the
 /// windows below, so "empty" overlay pixels get the lowest visible alpha.
 const BACKGROUND: u32 = 0x0100_0000;
-const WHITE: u32 = 0xFFFF_FFFF;
+/// Darkens everything outside the selection (premultiplied black).
+const DIM: u32 = 0x7A00_0000;
 
 pub(crate) const PANEL_FILL: Color = rgba(0x121212, 255);
 pub(crate) const PANEL_BORDER: Color = rgba(0x3A3A3A, 255);
@@ -41,11 +42,16 @@ const ACCENT: Color = rgba(0x2D8CFF, 255);
 pub(crate) const TEXT: Color = rgba(0xFFFFFF, 235);
 const TEXT_DIM: Color = rgba(0xFFFFFF, 130);
 const HANDLE_FILL: Color = rgba(0xFFFFFF, 255);
-const HANDLE_BORDER: Color = rgba(0x000000, 70);
+const HANDLE_SHADOW: Color = rgba(0x000000, 70);
+/// Handle stroke thickness, corner arm length and edge bar length, in
+/// logical pixels.
+const HANDLE_THICKNESS: f32 = 4.0;
+const HANDLE_ARM: f32 = 18.0;
+const HANDLE_BAR: f32 = 24.0;
 
 const RECORD_RED: Color = rgba(0xFF5A52, 255);
 
-const MIN_SIZE: i32 = 2;
+const MIN_SIZE: i32 = 16;
 const TOOLTIPS: [&str; 4] = ["Capture Area", "Capture Fullscreen", "Capture Window", "Record Screen"];
 const TOOLTIP_TIMER: usize = 1;
 pub(crate) const TOOLTIP_DELAY_MS: u32 = 400;
@@ -70,7 +76,7 @@ thread_local! {
     /// Last area in screen coordinates, restored the next time the menu opens.
     static LAST_AREA: Cell<Option<RECT>> = const { Cell::new(None) };
     static LAST_ASPECT: Cell<usize> = const { Cell::new(0) };
-    static LAST_SYSTEM_AUDIO: Cell<bool> = const { Cell::new(true) };
+    static LAST_SYSTEM_AUDIO: Cell<bool> = const { Cell::new(false) };
     /// Endpoint ID of the microphone last chosen for recording.
     static LAST_MIC: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -206,12 +212,14 @@ struct Layout {
     record: RECT,
     record_buttons: [RECT; 3],
     record_divider: RECT,
+    /// The rectangle the toolbar is attached to.
+    target: RECT,
 }
 
 impl Layout {
-    /// Centres two pill-shaped islands near the bottom of the work area,
-    /// with room for a third in Record mode.
-    fn new(work: RECT, scale: f32) -> Self {
+    /// Two pill-shaped islands attached to `target` (see `toolbar_origin`),
+    /// plus the Record island for Record mode (see `record_origin`).
+    fn new(target: RECT, work: RECT, scale: f32) -> Self {
         let px = |v: f32| (v * scale).round() as i32;
         let rect = |l: i32, t: i32, w: i32, h: i32| RECT {
             left: l,
@@ -232,9 +240,17 @@ impl Layout {
 
         let island_gap = px(10.0);
         let total = left_w + island_gap + right_w;
-        let x0 = (work.left + work.right - total) / 2;
-        let top = work.bottom - px(28.0) - panel_h;
+        let POINT { x: x0, y: top } = toolbar_origin(target, work, total, panel_h, total, Inside::Centre, scale);
         let cy = top + panel_h / 2;
+        // Popups open above the toolbar, or below it if there's no room.
+        let popup_top = |h: i32| {
+            let above = top - px(10.0) - h;
+            if above >= work.top {
+                above
+            } else {
+                top + panel_h + px(10.0)
+            }
+        };
 
         let left = rect(x0, top, left_w, panel_h);
         let buttons = [0, 1, 2, 3].map(|i| rect(left.left + pad + i * (btn + bgap), top + pad, btn, btn));
@@ -254,21 +270,23 @@ impl Layout {
 
         let (item_w, item_h) = (px(132.0), px(28.0));
         let dd_h = ASPECTS.len() as i32 * item_h + 2 * pad;
-        let dropdown = rect(right.right - item_w - 2 * pad, top - px(10.0) - dd_h, item_w + 2 * pad, dd_h);
+        let dropdown = rect(right.right - item_w - 2 * pad, popup_top(dd_h), item_w + 2 * pad, dd_h);
         let items = (0..ASPECTS.len() as i32)
             .map(|i| rect(dropdown.left + pad, dropdown.top + pad + i * item_h, item_w, item_h))
             .collect();
 
         let record_w = 2 * pad + 3 * btn + bgap + px(12.0) + divider_w;
-        let record = rect(right.right + island_gap, top, record_w, panel_h);
+        let POINT { x: rx, y: ry } = record_origin(target, work, union(left, right), record_w, panel_h, scale);
+        let record = rect(rx, ry, record_w, panel_h);
+        let (rtop, rcy) = (ry + pad, ry + panel_h / 2);
         let mut x = record.left + pad;
-        let system_audio = rect(x, top + pad, btn, btn);
+        let system_audio = rect(x, rtop, btn, btn);
         x += btn + bgap;
-        let mic = rect(x, top + pad, btn, btn);
+        let mic = rect(x, rtop, btn, btn);
         x += btn + px(6.0);
-        let record_divider = rect(x, cy - px(12.0), divider_w, px(24.0));
+        let record_divider = rect(x, rcy - px(12.0), divider_w, px(24.0));
         x += divider_w + px(6.0);
-        let start = rect(x, top + pad, btn, btn);
+        let start = rect(x, rtop, btn, btn);
 
         Self {
             left,
@@ -283,6 +301,7 @@ impl Layout {
             record,
             record_buttons: [system_audio, mic, start],
             record_divider,
+            target,
         }
     }
 }
@@ -295,9 +314,10 @@ struct Menu {
     height: i32,
     /// Taken out while drawing so the rest of the state can be borrowed.
     canvas: Option<Dib>,
-    tint: u32,
     scale: f32,
     monitor: RECT,
+    /// Work area of the monitor, in overlay coordinates.
+    work: RECT,
     layout: Layout,
     fonts: Fonts,
     mode: Mode,
@@ -321,6 +341,9 @@ struct Menu {
     /// Bounds of everything drawn last frame, so it can be erased.
     drawn: RECT,
     dirty: bool,
+    /// A capture or close triggered by a button press, applied on release so
+    /// the release doesn't reach whatever is under the menu once it closes.
+    pending: Option<Action>,
 }
 
 impl Drop for Menu {
@@ -349,7 +372,7 @@ impl Menu {
         ASPECTS[self.aspect].1
     }
 
-    /// The rectangle currently shown with the selection tint and border.
+    /// The rectangle left undimmed.
     fn highlight(&self) -> Option<RECT> {
         match self.mode {
             Mode::Area | Mode::Record => Some(self.area),
@@ -360,29 +383,51 @@ impl Menu {
         }
     }
 
-    fn handle_radius(&self) -> f32 {
-        4.5 * self.scale
-    }
-
-    /// Centres of the resize handles, on the selection's border pixels.
-    fn handle_points(&self) -> Vec<(f32, f32)> {
+    /// The resize handles, each as rounded-rectangle parts centred on the
+    /// selection's edges: L-shaped brackets with square corners at the
+    /// corners, and bars at the middle of each edge with room for one.
+    /// Every free end is rounded.
+    fn handle_shapes(&self) -> Vec<Vec<(RectF, f32)>> {
         let r = self.area;
-        let (l, t) = (r.left as f32 + 0.5, r.top as f32 + 0.5);
-        let (rt, b) = (r.right as f32 - 0.5, r.bottom as f32 - 0.5);
+        let (l, t, rt, b) = (r.left as f32, r.top as f32, r.right as f32, r.bottom as f32);
+        let (w, h) = (rt - l, b - t);
+        let s = self.scale;
+        let (th, bar) = (HANDLE_THICKNESS * s, HANDLE_BAR * s);
+        let half = th / 2.0;
+        let arm_x = (HANDLE_ARM * s).min(w / 2.0);
+        let arm_y = (HANDLE_ARM * s).min(h / 2.0);
+        let span = |a: f32, b: f32| (a.min(b), a.max(b));
+        let rect = |(l, r): (f32, f32), (t, b): (f32, f32)| RectF { l, t, r, b };
+
+        let mut shapes = Vec::new();
+        for (x, dx) in [(l, 1.0), (rt, -1.0)] {
+            for (y, dy) in [(t, 1.0), (b, -1.0)] {
+                let across_x = span(x - half, x + half);
+                let across_y = span(y - half, y + half);
+                shapes.push(vec![
+                    (rect(across_x, across_y), 0.0),
+                    (rect(span(x - dx * half, x + dx * arm_x), across_y), half),
+                    (rect(across_x, span(y - dy * half, y + dy * arm_y)), half),
+                ]);
+            }
+        }
         let (cx, cy) = ((l + rt) / 2.0, (t + b) / 2.0);
-        let mut pts = vec![(l, t), (rt, t), (rt, b), (l, b)];
-        let min_side = self.handle_radius() * 6.0;
-        if rt - l >= min_side {
-            pts.extend([(cx, t), (cx, b)]);
+        let min_side = 2.0 * HANDLE_ARM * s + bar + 16.0 * s;
+        if w >= min_side {
+            for y in [t, b] {
+                shapes.push(vec![(rect(span(cx - bar / 2.0, cx + bar / 2.0), span(y - half, y + half)), half)]);
+            }
         }
-        if b - t >= min_side {
-            pts.extend([(l, cy), (rt, cy)]);
+        if h >= min_side {
+            for x in [l, rt] {
+                shapes.push(vec![(rect(span(x - half, x + half), span(cy - bar / 2.0, cy + bar / 2.0)), half)]);
+            }
         }
-        pts
+        shapes
     }
 
     fn decor_bounds(&self) -> RECT {
-        let pad = self.handle_radius().ceil() as i32 + 2;
+        let pad = (HANDLE_THICKNESS * self.scale / 2.0).ceil() as i32 + 3;
         let mut r = self.highlight().map(|h| inflate(h, pad)).unwrap_or_default();
         r = union(r, union(self.layout.left, self.layout.right));
         if self.mode == Mode::Record {
@@ -447,12 +492,13 @@ impl Menu {
         let w = text_width(self.fonts.label, &text) + 2 * self.px(10.0);
         let h = self.px(26.0);
         let left = ((anchor.left + anchor.right - w) / 2).clamp(self.monitor.left, self.monitor.right - w);
-        let bottom = l.left.top - self.px(8.0);
+        let island = if matches!(hit, Hit::RecButton(_)) { l.record } else { l.left };
+        let top = self.popup_top(island, h, self.px(8.0));
         let r = RECT {
             left,
-            top: bottom - h,
+            top,
             right: left + w,
-            bottom,
+            bottom: top + h,
         };
         Some((r, text))
     }
@@ -499,6 +545,7 @@ impl Menu {
             return;
         }
         self.dirty = false;
+        self.relayout();
         let now = self.decor_bounds();
         let dirty = intersect(union(self.drawn, now), self.bounds());
         self.drawn = now;
@@ -544,22 +591,15 @@ impl Menu {
     }
 
     unsafe fn draw(&self, c: &mut Canvas) {
-        c.fill(c.clip(), BACKGROUND);
+        c.fill(c.clip(), DIM);
         if let Some(r) = self.highlight() {
-            c.fill(r, self.tint);
-            c.frame(r, WHITE);
+            c.fill(r, BACKGROUND);
         }
         if self.editable() {
-            let rad = self.handle_radius();
-            for (x, y) in self.handle_points() {
-                let dot = RectF {
-                    l: x - rad,
-                    t: y - rad,
-                    r: x + rad,
-                    b: y + rad,
-                };
-                c.round_rect(dot, rad, HANDLE_FILL);
-                c.round_rect_stroke(dot, rad, 1.0, HANDLE_BORDER);
+            for parts in self.handle_shapes() {
+                // A faint outline keeps the handles visible over white content.
+                c.round_rects(&parts, 1.0, HANDLE_SHADOW);
+                c.round_rects(&parts, 0.0, HANDLE_FILL);
             }
         }
         self.draw_toolbar(c);
@@ -820,6 +860,29 @@ impl Menu {
         self.dirty = true;
     }
 
+    /// Top of an `h`-tall popup `gap` above `island`, or below it if there's
+    /// no room above.
+    fn popup_top(&self, island: RECT, h: i32, gap: i32) -> i32 {
+        let above = island.top - gap - h;
+        if above >= self.work.top {
+            above
+        } else {
+            island.bottom + gap
+        }
+    }
+
+    /// Re-attaches the toolbar when the area has changed. In Window mode it
+    /// stays where it was rather than chasing the hovered window.
+    fn relayout(&mut self) {
+        if !self.editable() || self.layout.target == self.area {
+            return;
+        }
+        self.layout = Layout::new(self.area, self.work, self.scale);
+        if self.mode == Mode::Record {
+            self.layout_mic_popup();
+        }
+    }
+
     /// Lays out the microphone menu above its button, sized to fit the
     /// longest device name (within limits).
     fn layout_mic_popup(&mut self) {
@@ -836,12 +899,12 @@ impl Menu {
 
         let anchor = self.layout.record_buttons[REC_MIC];
         let left = (anchor.left - pad).clamp(self.monitor.left, (self.monitor.right - w).max(self.monitor.left));
-        let bottom = self.layout.left.top - self.px(10.0);
+        let top = self.popup_top(self.layout.record, h, self.px(10.0));
         self.mic_popup = RECT {
             left,
-            top: bottom - h,
+            top,
             right: left + w,
-            bottom,
+            bottom: top + h,
         };
         let mut y = self.mic_popup.top + pad;
         self.mic_items.clear();
@@ -1052,9 +1115,9 @@ impl Menu {
     }
 
     fn mouse_up(&mut self) {
-        if let Some(Drag::New { previous, .. }) = self.drag.take() {
+        if let Some(Drag::New { anchor, previous }) = self.drag.take() {
             // A click without a drag keeps the existing area.
-            if self.area.right - self.area.left <= MIN_SIZE || self.area.bottom - self.area.top <= MIN_SIZE {
+            if self.area == span(anchor, anchor, self.ratio(), self.monitor) {
                 self.area = previous;
             }
         }
@@ -1119,6 +1182,43 @@ impl Menu {
     }
 }
 
+/// Top-left corner for the `w` x `h` Record island: inside `target` along
+/// its bottom edge, otherwise just above it, otherwise below the toolbar
+/// (or above the toolbar if that's off screen). Spots overlapping the
+/// toolbar are skipped.
+fn record_origin(target: RECT, work: RECT, toolbar: RECT, w: i32, h: i32, scale: f32) -> POINT {
+    let px = |v: f32| (v * scale).round() as i32;
+    let (inset, gap, margin) = (px(28.0), px(12.0), px(8.0));
+    let inner = intersect(target, work);
+    let at = |x: i32, y: i32| RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    };
+    let centre_on = |l: i32, r: i32| ((l + r - w) / 2).clamp(work.left + margin, (work.right - margin - w).max(work.left + margin));
+    let x = centre_on(inner.left, inner.right);
+    let free = |r: RECT| is_empty(intersect(r, toolbar));
+
+    let fits_inside = inner.right - inner.left >= w + 2 * inset && inner.bottom - inner.top >= h + 2 * inset;
+    let inside = at(x, inner.bottom - inset - h);
+    if fits_inside && free(inside) {
+        return POINT { x, y: inside.top };
+    }
+    let above = at(x, target.top - gap - h);
+    if above.top >= work.top + margin && free(above) {
+        return POINT { x, y: above.top };
+    }
+    let tx = centre_on(toolbar.left, toolbar.right);
+    let below = toolbar.bottom + px(10.0);
+    let y = if below + h <= work.bottom - margin {
+        below
+    } else {
+        toolbar.top - px(10.0) - h
+    };
+    POINT { x: tx, y }
+}
+
 fn div_round(n: i32, d: i32) -> i32 {
     (n + d / 2) / d
 }
@@ -1157,10 +1257,11 @@ fn span(a: POINT, c: POINT, ratio: Option<(i32, i32)>, b: RECT) -> RECT {
     let c = clamp_point(c, b);
     let sx = if c.x < a.x { -1 } else { 1 };
     let sy = if c.y < a.y { -1 } else { 1 };
-    let (mut w, mut h) = ((c.x - a.x).abs() + 1, (c.y - a.y).abs() + 1);
+    let room_w = if sx < 0 { a.x - b.left + 1 } else { b.right - a.x };
+    let room_h = if sy < 0 { a.y - b.top + 1 } else { b.bottom - a.y };
+    let mut w = ((c.x - a.x).abs() + 1).max(MIN_SIZE).min(room_w);
+    let mut h = ((c.y - a.y).abs() + 1).max(MIN_SIZE).min(room_h);
     if let Some((rw, rh)) = ratio {
-        let room_w = if sx < 0 { a.x - b.left + 1 } else { b.right - a.x };
-        let room_h = if sy < 0 { a.y - b.top + 1 } else { b.bottom - a.y };
         w = w.max(div_round(h * rw, rh)).min(room_w);
         h = div_round(w * rh, rw);
         if h > room_h {
@@ -1535,10 +1636,11 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         width,
         height,
         canvas: Some(canvas),
-        tint: blend(BACKGROUND, SELECTION, 255),
+
         scale,
         monitor: monitor_rect,
-        layout: Layout::new(to_local(info.rcWork), scale),
+        work: to_local(info.rcWork),
+        layout: Layout::new(area, to_local(info.rcWork), scale),
         fonts: Fonts::new(scale),
         mode: Mode::Area,
         area,
@@ -1558,6 +1660,7 @@ unsafe fn start(instance: HINSTANCE) -> Result<()> {
         tooltip: None,
         drawn: bounds,
         dirty: true,
+        pending: None,
     };
     menu.refresh();
     MENU.with_borrow_mut(|m| *m = Some(menu));
@@ -1609,6 +1712,19 @@ fn finish(target: Option<Target>) {
     }
 }
 
+/// Holds back actions that close the menu until the mouse button is
+/// released, capturing the mouse so the release comes here.
+unsafe fn defer(hwnd: HWND, action: Option<Action>) -> Option<Action> {
+    match action {
+        Some(Action::Capture(_) | Action::Close) => {
+            with_menu(|m| m.pending = action);
+            SetCapture(hwnd);
+            None
+        }
+        other => other,
+    }
+}
+
 /// Applies the outcome of an input event, then redraws if needed.
 unsafe fn act(hwnd: HWND, action: Option<Action>) {
     match action {
@@ -1638,7 +1754,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_LBUTTONDOWN => {
                 let p = point_from_lparam(lparam);
                 let action = with_menu(|m| m.mouse_down(p));
-                act(hwnd, action);
+                act(hwnd, defer(hwnd, action));
                 return LRESULT(0);
             }
             WM_MOUSEMOVE => {
@@ -1650,12 +1766,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_LBUTTONUP => {
                 with_menu(|m| m.mouse_up());
                 let _ = ReleaseCapture();
-                act(hwnd, None);
+                act(hwnd, with_menu(|m| m.pending.take()).flatten());
                 return LRESULT(0);
             }
             WM_RBUTTONDOWN => {
                 let action = with_menu(|m| m.key_down(VK_ESCAPE));
-                act(hwnd, action);
+                act(hwnd, defer(hwnd, action));
+                return LRESULT(0);
+            }
+            WM_RBUTTONUP => {
+                let _ = ReleaseCapture();
+                act(hwnd, with_menu(|m| m.pending.take()).flatten());
                 return LRESULT(0);
             }
             WM_KEYDOWN => {

@@ -171,6 +171,38 @@ pub fn inflate(r: RECT, d: i32) -> RECT {
     }
 }
 
+/// Where a toolbar goes when it can't fit outside its target.
+#[derive(Clone, Copy)]
+pub enum Inside {
+    Centre,
+    Bottom,
+}
+
+/// Top-left corner for a `w` x `h` toolbar attached to `target`, kept within
+/// `work`: just below the target, otherwise just above it, otherwise inside
+/// it as `inside` says. The first `centred` pixels of its width are centred
+/// on the target.
+pub fn toolbar_origin(target: RECT, work: RECT, w: i32, h: i32, centred: i32, inside: Inside, scale: f32) -> POINT {
+    let px = |v: f32| (v * scale).round() as i32;
+    let (inset, gap, margin) = (px(28.0), px(12.0), px(8.0));
+    let inner = intersect(target, work);
+    let y = if target.bottom + gap + h <= work.bottom - margin {
+        target.bottom + gap
+    } else if target.top - gap - h >= work.top + margin {
+        target.top - gap - h
+    } else {
+        match inside {
+            Inside::Centre => (inner.top + inner.bottom - h) / 2,
+            Inside::Bottom => inner.bottom - inset - h,
+        }
+    };
+    let x = (target.left + target.right - centred) / 2;
+    POINT {
+        x: x.clamp(work.left + margin, (work.right - margin - w).max(work.left + margin)),
+        y: y.clamp(work.top + margin, (work.bottom - margin - h).max(work.top + margin)),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct RectF {
     pub l: f32,
@@ -267,14 +299,6 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Overwrites the outermost pixels of `r`.
-    pub fn frame(&mut self, r: RECT, px: u32) {
-        let (l, t, rt, b) = (r.left, r.top, r.right, r.bottom);
-        self.fill(RECT { left: l, top: t, right: rt, bottom: t + 1 }, px);
-        self.fill(RECT { left: l, top: b - 1, right: rt, bottom: b }, px);
-        self.fill(RECT { left: l, top: t, right: l + 1, bottom: b }, px);
-        self.fill(RECT { left: rt - 1, top: t, right: rt, bottom: b }, px);
-    }
 
     /// Blends `c` over every pixel near `bounds`, weighted by `coverage`
     /// (0.0-1.0) evaluated at the pixel centre.
@@ -292,6 +316,30 @@ impl<'a> Canvas<'a> {
                 }
             }
         }
+    }
+
+    /// Fills the union of rounded rectangles, grown outwards by `grow`, so
+    /// overlapping parts blend once.
+    pub fn round_rects(&mut self, parts: &[(RectF, f32)], grow: f32, c: Color) {
+        let Some(first) = parts.first() else {
+            return;
+        };
+        let bounds = parts.iter().fold(first.0, |b, (r, _)| RectF {
+            l: b.l.min(r.l),
+            t: b.t.min(r.t),
+            r: b.r.max(r.r),
+            b: b.b.max(r.b),
+        });
+        let bounds = RectF {
+            l: bounds.l - grow,
+            t: bounds.t - grow,
+            r: bounds.r + grow,
+            b: bounds.b + grow,
+        };
+        self.shade(bounds, c, |x, y| {
+            let d = parts.iter().map(|(r, rad)| sd_round_rect(x, y, *r, *rad)).fold(f32::MAX, f32::min);
+            (0.5 - (d - grow)).clamp(0.0, 1.0)
+        });
     }
 
     pub fn round_rect(&mut self, r: RectF, radius: f32, c: Color) {
